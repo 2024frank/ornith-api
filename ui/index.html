@@ -1611,45 +1611,56 @@ print("Stdev:", round(statistics.stdev(samples), 3))</textarea>
                 <span class="badge badge-success">v2.5 Ready</span>
               </div>
 
-              <h3 style="font-size:14px;font-weight:600;margin:14px 0 6px;">Step 1 — Install the CLI</h3>
-              <pre class="code-panel mono">curl -fsSL https://kusi-qwen-api.vercel.app/install.sh | bash</pre>
+              <h3 style="font-size:14px;font-weight:600;margin:14px 0 6px;">Step 1 — Install the CLI &amp; Add to Current Shell PATH</h3>
+              <p style="font-size:13px;color:var(--text-secondary);margin-bottom:8px;">Run this single command in your terminal. It installs <code>ornith</code> to <code>~/.local/bin/ornith</code>, updates your shell profile (<code>~/.bashrc</code> / <code>~/.zshrc</code>), and exports <code>PATH</code> in your active terminal immediately:</p>
+              <pre class="code-panel mono">curl -fsSL https://kusi-qwen-api.vercel.app/install.sh | bash &amp;&amp; export PATH="$HOME/.local/bin:$PATH"</pre>
+              <p style="font-size:12px;color:var(--text-muted);margin-top:6px;">Tip: If your shell ever reports <code>ornith: command not found</code> in an older terminal tab, run <code>export PATH="$HOME/.local/bin:$PATH"</code> (or <code>source ~/.bashrc</code>) or invoke <code>~/.local/bin/ornith</code> directly.</p>
 
               <h3 style="font-size:14px;font-weight:600;margin:18px 0 6px;">Step 2 — Authenticate (Choose Account Login or API Key)</h3>
               <p style="font-size:13px;color:var(--text-secondary);margin-bottom:8px;">Run <code>ornith login</code> to interactively select between signing in with your registered Developer Account (6-digit Resend code) or pasting an <code>sk-ornith-...</code> API key:</p>
-              <pre class="code-panel mono"># Interactive login selector (Account OTP or API Key)
+              <pre class="code-panel mono"># Interactive login selector:
+#   [1] Developer Account (Email + 6-Digit Resend Code) -> auto-mints &amp; saves your CLI key
+#   [2] API Key (sk-ornith-...)
 ornith login
 
-# Or authenticate directly with your Developer Account email (sends 6-digit Resend code):
+# Or authenticate directly with your Developer Account email:
 ornith login --account 2024frank@gmail.com
 
-# Or authenticate directly with an API Key:
+# Or authenticate directly with a Secret API Key:
 ornith login --api-key sk-ornith-YOUR_KEY
 
-# Verify your active local credentials:
+# Verify your active local credentials &amp; connection:
 ornith whoami</pre>
 
-              <h3 style="font-size:14px;font-weight:600;margin:18px 0 6px;">Step 3 — Launch the Interactive Coding Agent</h3>
-              <p style="font-size:13px;color:var(--text-secondary);margin-bottom:8px;">Use <code>ornith code</code> inside any git repository to give Ornith-1.5-35B local file read/write/edit and test-execution tools:</p>
+              <h3 style="font-size:14px;font-weight:600;margin:18px 0 6px;">Step 3 — Coding Agent, Chat, Image Generation &amp; Sandbox</h3>
+              <p style="font-size:13px;color:var(--text-secondary);margin-bottom:8px;">Use <code>ornith code</code> inside any git repository to give Ornith-1.5-35B local file read/write/edit and test-execution tools, or run multimodal and image generation tasks:</p>
               <pre class="code-panel mono"># Start interactive coding REPL in your current project directory
 ornith code
 
 # Or run a one-shot engineering task
 ornith code "Inspect this repository, add input validation to auth.py, and run pytest"
 
-# Multimodal vision, video, and sandbox commands
+# Stream a direct chat response
+ornith "Write a lock-free ring buffer in C++20"
+
+# Generate an image over the API (/v1/images/generations) and save locally
+ornith image "A futuristic obsidian server vault lit by emerald neon" --size 1024x1024 --out vault.png
+
+# Multimodal vision, video, and kernel-jailed sandbox commands
 ornith --image screenshot.png "Audit this UI layout and suggest CSS fixes"
 ornith --video demo.mp4 "Summarize the workflow shown in this clip"
 ornith sandbox --lang python "import math; print(math.factorial(20))"</pre>
 
-              <h3 style="font-size:14px;font-weight:600;margin:18px 0 6px;">Claude Code CLI &amp; OpenAI Codex CLI Wrappers</h3>
-              <pre class="code-panel mono"># Load your local Ornith environment variables into any shell
-source ~/.config/ornith/env.sh
+              <h3 style="font-size:14px;font-weight:600;margin:18px 0 6px;">Step 4 — Wire Into Claude Code, OpenAI Codex, Aider &amp; IDEs</h3>
+              <pre class="code-panel mono"># Load your local Ornith environment variables into your current shell
+eval "$(ornith env)"
+# (Or: source ~/.config/ornith/env.sh)
 
 # Launch Claude Code powered by Ornith-1.5-35B-Uncensored (/v1/messages)
-claude-ornith
+ANTHROPIC_BASE_URL="https://kusi-qwen-api.vercel.app" ANTHROPIC_API_KEY="$ORNITH_API_KEY" claude --model ornith-1.5-35b-uncensored
 
-# Launch OpenAI Codex CLI powered by Ornith-1.5-35B-Uncensored (/v1/responses)
-codex-ornith</pre>
+# Launch OpenAI Codex / Aider powered by Ornith-1.5-35B-Uncensored (/v1/responses &amp; /v1/chat/completions)
+OPENAI_BASE_URL="https://kusi-qwen-api.vercel.app/v1" OPENAI_API_KEY="$ORNITH_API_KEY" aider --model openai/ornith-1.5-35b-uncensored</pre>
             </div>
           </div>
         </div>
@@ -1663,12 +1674,12 @@ codex-ornith</pre>
               <div class="card-header">
                 <div>
                   <h2 class="card-title">Ornith Platform Documentation &amp; API Reference</h2>
-                  <p style="font-size:13px;color:var(--text-secondary);">Drop-in compatible with OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages protocols. All data lives locally with masked infrastructure.</p>
+                  <p style="font-size:13px;color:var(--text-secondary);">Drop-in compatible with OpenAI Chat Completions, OpenAI Responses, OpenAI Images, and Anthropic Messages protocols. All data lives locally with masked infrastructure.</p>
                 </div>
               </div>
 
               <div class="tab-strip">
-                <button class="tab-btn active" onclick="switchDocTab('quickstart', this)">Quickstart</button>
+                <button class="tab-btn active" onclick="switchDocTab('quickstart', this)">Quickstart &amp; CLI</button>
                 <button class="tab-btn" onclick="switchDocTab('images', this)">Image Generation API</button>
                 <button class="tab-btn" onclick="switchDocTab('multimodal', this)">Vision &amp; Video</button>
                 <button class="tab-btn" onclick="switchDocTab('tools', this)">Tools &amp; Guardrails</button>
@@ -1676,7 +1687,17 @@ codex-ornith</pre>
               </div>
 
               <div id="doc-tab-quickstart" class="doc-pane" style="margin-top:14px;">
-                <p style="font-size:13.5px;color:var(--text-secondary);margin-bottom:10px;">Authenticate with <code>Authorization: Bearer sk-ornith-...</code> against <code>https://kusi-qwen-api.vercel.app/v1</code> using any official OpenAI client library:</p>
+                <p style="font-size:13.5px;color:var(--text-secondary);margin-bottom:10px;"><strong>1. CLI Installation &amp; Login</strong> — Install <code>ornith</code> and immediately add <code>~/.local/bin</code> to your active shell <code>PATH</code>:</p>
+                <pre class="code-panel mono" style="margin-bottom:16px;"># Install CLI and export PATH in your current terminal
+curl -fsSL https://kusi-qwen-api.vercel.app/install.sh | bash &amp;&amp; export PATH="$HOME/.local/bin:$PATH"
+
+# Sign in (choose [1] Developer Account via 6-digit Resend code or [2] API Key)
+ornith login
+
+# Check status or launch the coding agent
+ornith whoami
+ornith code</pre>
+                <p style="font-size:13.5px;color:var(--text-secondary);margin-bottom:10px;"><strong>2. OpenAI Python SDK</strong> — Authenticate with <code>Authorization: Bearer sk-ornith-...</code> against <code>https://kusi-qwen-api.vercel.app/v1</code>:</p>
                 <pre class="code-panel mono">from openai import OpenAI
 
 client = OpenAI(

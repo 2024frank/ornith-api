@@ -28,9 +28,9 @@ An OpenAI Platform Studio + ChatGPT-grade developer console, multi-protocol infe
   - **SSRF & Secret Scrubbing**: Blocks `file://` URLs and loopback/private IP ranges in `read_webpage` and `image_url`, and scrubs internal host paths and secret prefixes from outputs.
 
 - **Installable CLI & Autonomous Coding Agent (`ornith_sdk.py`)**
-  - Install anywhere with one command:
+  - Install anywhere and export `PATH` in your active shell with one command:
     ```bash
-    curl -fsSL https://kusi-qwen-api.vercel.app/install.sh | bash
+    curl -fsSL https://kusi-qwen-api.vercel.app/install.sh | bash && export PATH="$HOME/.local/bin:$PATH"
     ```
   - Interactive dual-mode authentication (`ornith login`):
     1. **Developer Account (Email + 6-Digit Resend Code)** — automatically mints and saves a dedicated CLI API key.
@@ -43,11 +43,18 @@ An OpenAI Platform Studio + ChatGPT-grade developer console, multi-protocol infe
 ### 1. Install & Authenticate the CLI
 
 ```bash
-# Install the ornith CLI & Python SDK
-curl -fsSL https://kusi-qwen-api.vercel.app/install.sh | bash
+# Install the ornith CLI & export ~/.local/bin into your current terminal PATH
+curl -fsSL https://kusi-qwen-api.vercel.app/install.sh | bash && export PATH="$HOME/.local/bin:$PATH"
+
+# (If opening an older terminal tab where PATH wasn't reloaded yet, run:)
+export PATH="$HOME/.local/bin:$PATH"
 
 # Authenticate (choose [1] Email + 6-Digit Resend Code or [2] API Key)
 ornith login
+
+# Or sign in directly with your Developer Account email or API key:
+ornith login --account 2024frank@gmail.com
+ornith login --api-key sk-ornith-YOUR_SECRET_KEY
 
 # Check account & connection status
 ornith whoami
@@ -122,3 +129,4 @@ print("\nGenerated Image URL:", img.data[0].url)
    ```bash
    python3 gateway.py
    ```
+
