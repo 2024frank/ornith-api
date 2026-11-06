@@ -1,0 +1,24 @@
+# Secrets & Credentials
+.env
+.env.*
+!.env.example
+keys.txt
+
+# Local Databases, Logs & Generated Assets
+data/
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.log
+public-url.txt
+vercel-origin.txt
+
+# Python & OS
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.DS_Store
+.vercel*

@@ -1,0 +1,2690 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ornith Studio — Developer Platform & Playground</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Azeret+Mono:wght@400;500;600&family=Chivo:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root, [data-theme="dark"] {
+      --bg-canvas: #0D0E11;
+      --bg-sidebar: #13151A;
+      --bg-elevated: #181B22;
+      --bg-control: #20242D;
+      --bg-hover: rgba(255, 255, 255, 0.055);
+      --bg-active: rgba(34, 197, 155, 0.14);
+      --bg-backdrop: rgba(8, 9, 12, 0.76);
+      --text-primary: #ECECF1;
+      --text-secondary: #A6ACB8;
+      --text-muted: #8E95A5;
+      --accent: #22C59B;
+      --accent-hover: #34D399;
+      --accent-fg: #07130F;
+      --accent-soft: rgba(34, 197, 155, 0.14);
+      --btn-primary-bg: #ECECF1;
+      --btn-primary-fg: #0D0E11;
+      --btn-primary-hover: #FFFFFF;
+      --border: #252830;
+      --border-strong: #323744;
+      --success: #22C59B;
+      --warning: #FBBF24;
+      --danger: #F87171;
+      --code-bg: #111318;
+      --shadow-modal: 0 24px 48px rgba(0, 0, 0, 0.55);
+    }
+
+    [data-theme="light"] {
+      --bg-canvas: #FFFFFF;
+      --bg-sidebar: #F7F7F8;
+      --bg-elevated: #F9FAFB;
+      --bg-control: #F0F1F4;
+      --bg-hover: rgba(15, 23, 42, 0.05);
+      --bg-active: rgba(11, 122, 94, 0.10);
+      --bg-backdrop: rgba(15, 23, 42, 0.45);
+      --text-primary: #111827;
+      --text-secondary: #4B5563;
+      --text-muted: #525866;
+      --accent: #0B7A5E;
+      --accent-hover: #09634C;
+      --accent-fg: #FFFFFF;
+      --accent-soft: rgba(11, 122, 94, 0.10);
+      --btn-primary-bg: #111827;
+      --btn-primary-fg: #FFFFFF;
+      --btn-primary-hover: #1F2937;
+      --border: #E5E7EB;
+      --border-strong: #D1D5DB;
+      --success: #0B7A5E;
+      --warning: #B45309;
+      --danger: #B91C1C;
+      --code-bg: #F3F4F6;
+      --shadow-modal: 0 20px 40px rgba(15, 23, 42, 0.14);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg-canvas);
+      color: var(--text-primary);
+      font-family: 'Chivo', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 14px;
+      line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
+      overflow: hidden;
+    }
+
+    code, pre, .mono {
+      font-family: 'Azeret Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-feature-settings: "tnum" 1;
+    }
+
+    button, input, select, textarea {
+      font: inherit;
+      color: inherit;
+    }
+
+    /* ── Studio Shell Layout ────────────────────────────────────────── */
+    .studio-shell {
+      display: grid;
+      grid-template-columns: 248px 1fr;
+      height: 100vh;
+      width: 100vw;
+      overflow: hidden;
+    }
+
+    /* ── Left Sidebar ───────────────────────────────────────────────── */
+    .sidebar {
+      background: var(--bg-sidebar);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 14px 10px;
+      user-select: none;
+      overflow-y: auto;
+    }
+
+    .brand-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 10px 14px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 12px;
+    }
+
+    .brand-id {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .brand-mark {
+      width: 28px;
+      height: 28px;
+      border-radius: 7px;
+      background: var(--accent);
+      color: var(--accent-fg);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .brand-title {
+      font-weight: 600;
+      font-size: 14.5px;
+      letter-spacing: -0.01em;
+      color: var(--text-primary);
+    }
+
+    .brand-sub {
+      font-size: 11px;
+      color: var(--text-muted);
+      display: block;
+    }
+
+    .nav-group {
+      margin-bottom: 16px;
+    }
+
+    .nav-group-label {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      padding: 4px 10px 6px;
+    }
+
+    .nav-btn {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 10px;
+      border-radius: 7px;
+      border: none;
+      background: transparent;
+      color: var(--text-secondary);
+      font-size: 13.5px;
+      font-weight: 500;
+      cursor: pointer;
+      text-align: left;
+      transition: background 120ms ease, color 120ms ease;
+    }
+
+    .nav-btn:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+
+    .nav-btn.active {
+      background: var(--bg-active);
+      color: var(--accent);
+      font-weight: 600;
+    }
+
+    .nav-btn svg {
+      width: 16px;
+      height: 16px;
+      flex-shrink: 0;
+    }
+
+    .sidebar-footer {
+      border-top: 1px solid var(--border);
+      padding-top: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .privacy-pill {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      font-size: 11.5px;
+      color: var(--text-secondary);
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: var(--success);
+      flex-shrink: 0;
+    }
+
+    .status-dot.offline {
+      background: var(--danger);
+    }
+
+    .account-card {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      gap: 8px;
+    }
+
+    .account-email {
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-primary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 145px;
+    }
+
+    .account-role {
+      font-size: 11.5px;
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    /* ── Main Content Area ──────────────────────────────────────────── */
+    .studio-main {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+      background: var(--bg-canvas);
+    }
+
+    .topbar {
+      height: 54px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 20px;
+      flex-shrink: 0;
+      background: var(--bg-canvas);
+    }
+
+    .topbar-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .view-title {
+      font-size: 15.5px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+
+    .model-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: var(--bg-control);
+      border: 1px solid var(--border);
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .topbar-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* ── Buttons & Inputs ───────────────────────────────────────────── */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      padding: 7px 13px;
+      border-radius: 7px;
+      font-size: 13px;
+      font-weight: 500;
+      border: 1px solid var(--border);
+      background: var(--bg-elevated);
+      color: var(--text-primary);
+      cursor: pointer;
+      transition: background 120ms ease, border-color 120ms ease;
+      white-space: nowrap;
+    }
+
+    .btn:hover {
+      background: var(--bg-control);
+      border-color: var(--border-strong);
+    }
+
+    .btn-primary {
+      background: var(--btn-primary-bg);
+      color: var(--btn-primary-fg);
+      border-color: transparent;
+      font-weight: 600;
+    }
+
+    .btn-primary:hover {
+      background: var(--btn-primary-hover);
+      border-color: transparent;
+    }
+
+    .btn-accent {
+      background: var(--accent);
+      color: var(--accent-fg);
+      border-color: transparent;
+      font-weight: 600;
+    }
+
+    .btn-accent:hover {
+      background: var(--accent-hover);
+    }
+
+    .btn-danger {
+      color: var(--danger);
+      border-color: rgba(239, 68, 68, 0.35);
+      background: rgba(239, 68, 68, 0.08);
+    }
+
+    .btn-sm {
+      padding: 5px 10px;
+      font-size: 12px;
+    }
+
+    .input, .select, .textarea {
+      width: 100%;
+      padding: 8px 11px;
+      border-radius: 7px;
+      border: 1px solid var(--border);
+      background: var(--bg-elevated);
+      color: var(--text-primary);
+      font-size: 13.5px;
+      outline: none;
+      transition: border-color 120ms ease;
+    }
+
+    .input:focus, .select:focus, .textarea:focus {
+      border-color: var(--accent);
+    }
+
+    /* ── View Containers ────────────────────────────────────────────── */
+    .view-pane {
+      display: none;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    .view-pane.active {
+      display: flex;
+    }
+
+    .scroll-page {
+      flex: 1;
+      overflow-y: auto;
+      padding: 28px 32px 64px;
+    }
+
+    .page-inner {
+      max-width: 1080px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+
+    /* ── Playground Workspace (OpenAI Studio + ChatGPT) ─────────────── */
+    .playground-layout {
+      display: flex;
+      flex: 1;
+      height: 100%;
+      overflow: hidden;
+    }
+
+    .playground-center {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      overflow: hidden;
+    }
+
+    .playground-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 20px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-elevated);
+      flex-wrap: wrap;
+    }
+
+    .toolbar-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .system-prompt-bar {
+      padding: 10px 20px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-canvas);
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+    }
+
+    .system-label {
+      font-size: 11.5px;
+      font-weight: 600;
+      color: var(--text-muted);
+      padding-top: 6px;
+      white-space: nowrap;
+    }
+
+    .system-input {
+      flex: 1;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--text-primary);
+      font-size: 13px;
+      resize: none;
+      padding: 4px 8px;
+      border-radius: 6px;
+      min-height: 30px;
+      max-height: 90px;
+    }
+
+    .system-input:focus {
+      background: var(--bg-elevated);
+      border-color: var(--border-strong);
+      outline: none;
+    }
+
+    /* Single vs Side-by-Side Compare Streams */
+    .streams-grid {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 1fr;
+      overflow: hidden;
+    }
+
+    .streams-grid.compare-mode {
+      grid-template-columns: 1fr 1fr;
+    }
+
+    .chat-column {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      overflow: hidden;
+      border-right: 1px solid var(--border);
+    }
+
+    .chat-column:last-child {
+      border-right: none;
+    }
+
+    .compare-header {
+      display: none;
+      padding: 8px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-sidebar);
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .streams-grid.compare-mode .compare-header {
+      display: flex;
+    }
+
+    .messages-scroll {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px 24px 16px;
+    }
+
+    .messages-inner {
+      max-width: 768px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .empty-chat {
+      text-align: center;
+      padding: 56px 20px;
+      max-width: 560px;
+      margin: auto;
+    }
+
+    .empty-chat h2 {
+      font-size: 22px;
+      font-weight: 600;
+      margin-bottom: 8px;
+      letter-spacing: -0.02em;
+    }
+
+    .empty-chat p {
+      color: var(--text-secondary);
+      font-size: 14px;
+      margin-bottom: 22px;
+    }
+
+    .starter-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px;
+      text-align: left;
+    }
+
+    .starter-card {
+      padding: 12px 14px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--bg-elevated);
+      cursor: pointer;
+      transition: border-color 120ms ease, background 120ms ease;
+    }
+
+    .starter-card:hover {
+      border-color: var(--accent);
+      background: var(--bg-control);
+    }
+
+    .starter-card strong {
+      display: block;
+      font-size: 13px;
+      margin-bottom: 3px;
+      color: var(--text-primary);
+    }
+
+    .starter-card span {
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    /* Chat Message Bubbles */
+    .msg-row {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .msg-row.user {
+      align-items: flex-end;
+    }
+
+    .msg-row.assistant {
+      align-items: flex-start;
+    }
+
+    .msg-role {
+      font-size: 11.5px;
+      font-weight: 600;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .msg-bubble {
+      max-width: 100%;
+      line-height: 1.65;
+      font-size: 14.5px;
+      word-break: break-word;
+    }
+
+    .msg-row.user .msg-bubble {
+      background: var(--bg-control);
+      border: 1px solid var(--border);
+      padding: 11px 16px;
+      border-radius: 16px;
+      max-width: 85%;
+    }
+
+    .msg-row.assistant .msg-bubble {
+      width: 100%;
+      padding: 4px 0;
+    }
+
+    .msg-bubble pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 14px;
+      overflow-x: auto;
+      margin: 10px 0;
+      font-size: 12.5px;
+      line-height: 1.55;
+    }
+
+    .msg-bubble img {
+      max-width: 360px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      margin-top: 8px;
+      display: block;
+    }
+
+    .thinking-acc {
+      border: 1px solid var(--border);
+      background: var(--bg-elevated);
+      border-radius: 8px;
+      margin-bottom: 8px;
+      overflow: hidden;
+    }
+
+    .thinking-acc summary {
+      padding: 7px 12px;
+      font-size: 12px;
+      color: var(--text-secondary);
+      cursor: pointer;
+      user-select: none;
+      font-weight: 500;
+    }
+
+    .thinking-body {
+      padding: 10px 12px;
+      border-top: 1px solid var(--border);
+      font-size: 12px;
+      color: var(--text-secondary);
+      white-space: pre-wrap;
+      max-height: 220px;
+      overflow-y: auto;
+    }
+
+    .tool-pill-trace {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 6px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 11.5px;
+      margin: 4px 4px 4px 0;
+    }
+
+    /* ChatGPT-style Composer Dock */
+    .composer-dock {
+      padding: 12px 24px 18px;
+      background: var(--bg-canvas);
+      border-top: 1px solid var(--border);
+    }
+
+    .composer-box {
+      max-width: 768px;
+      margin: 0 auto;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-strong);
+      border-radius: 16px;
+      padding: 10px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .composer-box:focus-within {
+      border-color: var(--accent);
+    }
+
+    .attachment-strip {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .att-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 9px;
+      border-radius: 6px;
+      background: var(--bg-control);
+      border: 1px solid var(--border);
+      font-size: 11.5px;
+    }
+
+    .composer-textarea {
+      width: 100%;
+      border: none;
+      background: transparent;
+      color: var(--text-primary);
+      resize: none;
+      outline: none;
+      font-size: 14.5px;
+      min-height: 44px;
+      max-height: 160px;
+    }
+
+    .composer-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .tool-toggles {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .chip-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 4px 9px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--bg-canvas);
+      color: var(--text-secondary);
+      font-size: 11.5px;
+      cursor: pointer;
+      transition: all 120ms ease;
+    }
+
+    .chip-toggle.active {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+      color: var(--accent);
+      font-weight: 600;
+    }
+
+    /* Right Parameter Drawer */
+    .param-drawer {
+      width: 296px;
+      border-left: 1px solid var(--border);
+      background: var(--bg-sidebar);
+      padding: 18px 16px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+      flex-shrink: 0;
+    }
+
+    .param-drawer.collapsed {
+      display: none;
+    }
+
+    .param-block {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .param-head {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12.5px;
+      font-weight: 500;
+      color: var(--text-secondary);
+    }
+
+    .range-slider {
+      width: 100%;
+      accent-color: var(--accent);
+    }
+
+    /* ── Cards, Tables, Split Inspector ─────────────────────────────── */
+    .card {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 20px;
+    }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    .card-title {
+      font-size: 16px;
+      font-weight: 600;
+    }
+
+    .stats-row {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 14px;
+    }
+
+    .stat-box {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px 18px;
+    }
+
+    .stat-label {
+      font-size: 12px;
+      color: var(--text-secondary);
+      margin-bottom: 6px;
+    }
+
+    .stat-value {
+      font-size: 24px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      padding: 8px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+      font-size: 13px;
+    }
+
+    th, td {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    th {
+      background: var(--bg-sidebar);
+      color: var(--text-secondary);
+      font-weight: 600;
+      font-size: 11.5px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    tr.clickable-row {
+      cursor: pointer;
+    }
+
+    tr.clickable-row:hover td {
+      background: var(--bg-hover);
+    }
+
+    tr.clickable-row.selected td {
+      background: var(--bg-active);
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+      background: var(--bg-control);
+      color: var(--text-secondary);
+    }
+
+    .badge-success {
+      background: rgba(16, 163, 127, 0.16);
+      color: var(--success);
+    }
+
+    .badge-warn {
+      background: rgba(245, 158, 11, 0.16);
+      color: var(--warning);
+    }
+
+    .badge-danger {
+      background: rgba(239, 68, 68, 0.16);
+      color: var(--danger);
+    }
+
+    /* Split Inspector for Traces & Logs */
+    .split-inspector {
+      display: grid;
+      grid-template-columns: 1.15fr 0.85fr;
+      flex: 1;
+      height: 100%;
+      overflow: hidden;
+    }
+
+    .inspector-list {
+      border-right: 1px solid var(--border);
+      overflow-y: auto;
+      padding: 20px;
+    }
+
+    .inspector-detail {
+      background: var(--bg-sidebar);
+      overflow-y: auto;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .code-panel {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px;
+      overflow-x: auto;
+      font-size: 12.5px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+    }
+
+    /* Modals & Auth Gate */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: var(--bg-backdrop);
+      backdrop-filter: blur(4px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      padding: 20px;
+    }
+
+    .modal-backdrop.open {
+      display: flex;
+    }
+
+    .modal-card {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-strong);
+      border-radius: 12px;
+      width: 100%;
+      max-width: 520px;
+      padding: 26px;
+      box-shadow: var(--shadow-modal);
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .modal-card.wide {
+      max-width: 720px;
+    }
+
+    .tab-strip {
+      display: flex;
+      gap: 6px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 10px;
+    }
+
+    .tab-btn {
+      padding: 6px 12px;
+      border-radius: 6px;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--text-secondary);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+
+    .tab-btn.active {
+      background: var(--bg-control);
+      color: var(--text-primary);
+      border-color: var(--border);
+      font-weight: 600;
+    }
+
+    .media-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+      gap: 14px;
+    }
+
+    .media-item {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      background: var(--bg-elevated);
+      display: flex;
+      flex-direction: column;
+    }
+
+    .media-item img {
+      width: 100%;
+      height: 160px;
+      object-fit: cover;
+      background: var(--code-bg);
+    }
+
+    .media-meta {
+      padding: 10px 12px;
+      font-size: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    @media (max-width: 960px) {
+      .studio-shell {
+        grid-template-columns: 1fr;
+      }
+      .sidebar {
+        display: none;
+      }
+      .param-drawer {
+        display: none;
+      }
+      .split-inspector {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="studio-shell">
+    <!-- ── Left Sidebar Navigation ──────────────────────────────────── -->
+    <aside class="sidebar">
+      <div>
+        <div class="brand-row">
+          <div class="brand-id">
+            <span class="brand-mark">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+              </svg>
+            </span>
+            <div>
+              <span class="brand-title">Ornith Studio</span>
+              <span class="brand-sub">Developer Platform</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="nav-group">
+          <div class="nav-group-label">Playground</div>
+          <button class="nav-btn active" data-view="playground" onclick="switchView('playground')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            Chat &amp; Compare
+          </button>
+          <button class="nav-btn" data-view="sandbox" onclick="switchView('sandbox')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+            Code Interpreter
+          </button>
+        </div>
+
+        <div class="nav-group">
+          <div class="nav-group-label">Dashboard</div>
+          <button class="nav-btn" data-view="logs" onclick="switchView('logs')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+            Traces &amp; Logs
+          </button>
+          <button class="nav-btn" data-view="usage" onclick="switchView('usage')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+            Usage &amp; Activity
+          </button>
+          <button class="nav-btn" data-view="storage" onclick="switchView('storage')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+            Storage &amp; Media
+          </button>
+          <button class="nav-btn" data-view="keys" onclick="switchView('keys')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+            API Keys
+          </button>
+          <button class="nav-btn" id="navTeamBtn" data-view="team" onclick="switchView('team')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+            Team &amp; Access
+          </button>
+        </div>
+
+        <div class="nav-group">
+          <div class="nav-group-label">Resources</div>
+          <button class="nav-btn" data-view="cli" onclick="switchView('cli')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+            CLI &amp; Coding Agent
+          </button>
+          <button class="nav-btn" data-view="docs" onclick="switchView('docs')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+            Documentation
+          </button>
+        </div>
+      </div>
+
+      <div class="sidebar-footer">
+        <div class="privacy-pill" title="All conversations, credentials, and files live strictly on local encrypted storage with masked infrastructure.">
+          <span class="status-dot" id="modelStatusDot"></span>
+          <div>
+            <div style="font-weight:600;color:var(--text-primary);" id="modelStatusLabel">Ornith-1.5-35B Ready</div>
+            <div style="font-size:11.5px;">100% Local Encrypted Data</div>
+          </div>
+        </div>
+
+        <div class="account-card">
+          <div>
+            <div class="account-email" id="sidebarUserEmail">Not signed in</div>
+            <div class="account-role" id="sidebarUserRole">Guest</div>
+          </div>
+          <button class="btn btn-sm" id="sidebarAuthBtn" onclick="openAuthModal()">Sign In</button>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ── Main Studio Area ─────────────────────────────────────────── -->
+    <main class="studio-main">
+      <header class="topbar">
+        <div class="topbar-left">
+          <h1 class="view-title" id="topbarTitle">Playground</h1>
+          <span class="model-badge mono">ornith-1.5-35b-uncensored · 128K ctx</span>
+        </div>
+        <div class="topbar-actions">
+          <button class="btn btn-sm" onclick="switchView('cli')">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+            Install CLI
+          </button>
+          <button class="btn btn-sm" onclick="openViewCodeModal()">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+            View Code
+          </button>
+          <button class="btn btn-sm" onclick="toggleTheme()" id="themeToggleBtn" title="Toggle Light / Dark Theme">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/></svg>
+            Theme
+          </button>
+        </div>
+      </header>
+
+      <!-- 1. PLAYGROUND VIEW -->
+      <section class="view-pane active" id="view-playground">
+        <div class="playground-layout">
+          <div class="playground-center">
+            <div class="playground-toolbar">
+              <div class="toolbar-group">
+                <select class="select" id="presetSelect" style="width:230px;" onchange="applySelectedPreset()">
+                  <option value="">Load Studio Preset…</option>
+                </select>
+                <button class="btn btn-sm" onclick="saveCurrentPreset()">Save Preset</button>
+                <button class="btn btn-sm" id="compareToggleBtn" onclick="toggleCompareMode()">Side-by-Side Compare</button>
+              </div>
+              <div class="toolbar-group">
+                <button class="btn btn-sm" onclick="clearPlayground()">Clear Chat</button>
+                <button class="btn btn-sm" onclick="toggleParamDrawer()">Parameters</button>
+              </div>
+            </div>
+
+            <div class="system-prompt-bar">
+              <span class="system-label">SYSTEM</span>
+              <textarea id="systemPromptInput" class="system-input" rows="1" placeholder="Define system instructions, persona, or output constraints...">You are Ornith-1.5-35B-Uncensored, a direct, high-precision multimodal AI and software engineering assistant.</textarea>
+            </div>
+
+            <div class="streams-grid" id="streamsGrid">
+              <!-- Stream A -->
+              <div class="chat-column">
+                <div class="compare-header">
+                  <span>Run A · Primary Configuration</span>
+                  <span class="mono" id="compareMetaA">temp 0.6</span>
+                </div>
+                <div class="messages-scroll" id="chatScrollA">
+                  <div class="messages-inner" id="chatMessagesA">
+                    <div class="empty-chat" id="emptyStateA">
+                      <h2>What would you like to build or analyze?</h2>
+                      <p>Ornith-1.5-35B-Uncensored combines 128K context, native vision &amp; video reasoning, autonomous web search, and an isolated code interpreter.</p>
+                      <div class="starter-grid">
+                        <div class="starter-card" onclick="fillPrompt('Write a production-ready async Python worker pool with graceful shutdown and test it in the sandbox.')">
+                          <strong>Code &amp; Verify in Sandbox</strong>
+                          <span>Write async Python and execute unit tests</span>
+                        </div>
+                        <div class="starter-card" onclick="fillPrompt('Design a PostgreSQL schema for an event-sourced ledger with zero-downtime partitioning.')">
+                          <strong>Systems Architecture</strong>
+                          <span>Event-sourced ledger with partitioning</span>
+                        </div>
+                        <div class="starter-card" onclick="fillPrompt('Use web_search to summarize the latest Linux kernel release highlights with citations.')">
+                          <strong>Autonomous Web Research</strong>
+                          <span>Live web search and page synthesis</span>
+                        </div>
+                        <div class="starter-card" onclick="fillPrompt('Generate an architectural diagram concept and explain speculative decoding throughput math.')">
+                          <strong>Deep Reasoning &amp; Math</strong>
+                          <span>Step-by-step chain of thought analysis</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Stream B (Visible in Side-by-Side Compare Mode) -->
+              <div class="chat-column" id="chatColB" style="display:none;">
+                <div class="compare-header">
+                  <span>Run B · Comparison Variant (Direct / Low Temp)</span>
+                  <span class="mono">temp 0.2 · no-think</span>
+                </div>
+                <div class="messages-scroll" id="chatScrollB">
+                  <div class="messages-inner" id="chatMessagesB"></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="composer-dock">
+              <div class="composer-box">
+                <div class="attachment-strip" id="attachmentStrip"></div>
+                <textarea id="chatInput" class="composer-textarea" placeholder="Message Ornith-1.5-35B… (Shift+Enter for newline, Enter to send)" onkeydown="handleComposerKey(event)"></textarea>
+                <div class="composer-footer">
+                  <div class="tool-toggles">
+                    <label class="chip-toggle" title="Attach image or video (.png, .jpg, .webp, .mp4)">
+                      <input type="file" id="mediaUploadInput" accept="image/*,video/*" style="display:none;" onchange="handleMediaAttach(event)" />
+                      + Media
+                    </label>
+                    <button type="button" class="chip-toggle active" id="toggleThink" onclick="toggleChip(this)">Thinking</button>
+                    <button type="button" class="chip-toggle active" data-tool="web_search" onclick="toggleChip(this)">Web Search</button>
+                    <button type="button" class="chip-toggle active" data-tool="run_sandbox_code" onclick="toggleChip(this)">Code Interpreter</button>
+                    <button type="button" class="chip-toggle active" data-tool="generate_image" onclick="toggleChip(this)">Image Gen</button>
+                    <button type="button" class="chip-toggle" onclick="openCustomFnModal()">+ Function JSON</button>
+                  </div>
+                  <div style="display:flex;align-items:center;gap:8px;">
+                    <span class="mono" style="font-size:11.5px;color:var(--text-muted);" id="chatLatencyBadge"></span>
+                    <button class="btn btn-accent" id="sendChatBtn" onclick="sendPlaygroundMessage()">Send</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Right Parameter Drawer -->
+          <aside class="param-drawer" id="paramDrawer">
+            <div class="param-block">
+              <div class="param-head"><span>Model</span><span class="mono">35.5B Q8_0</span></div>
+              <select class="select" id="paramModel">
+                <option value="ornith-1.5-35b-uncensored">ornith-1.5-35b-uncensored</option>
+                <option value="ornith-1.5-35b">ornith-1.5-35b</option>
+              </select>
+            </div>
+
+            <div class="param-block">
+              <div class="param-head"><span>Temperature</span><span class="mono" id="valTemp">0.60</span></div>
+              <input type="range" class="range-slider" id="paramTemp" min="0" max="1.5" step="0.05" value="0.6" oninput="document.getElementById('valTemp').textContent=Number(this.value).toFixed(2)" />
+            </div>
+
+            <div class="param-block">
+              <div class="param-head"><span>Top P</span><span class="mono" id="valTopP">0.95</span></div>
+              <input type="range" class="range-slider" id="paramTopP" min="0.05" max="1" step="0.05" value="0.95" oninput="document.getElementById('valTopP').textContent=Number(this.value).toFixed(2)" />
+            </div>
+
+            <div class="param-block">
+              <div class="param-head"><span>Max Output Tokens</span><span class="mono" id="valMaxTok">4096</span></div>
+              <input type="range" class="range-slider" id="paramMaxTok" min="256" max="16384" step="256" value="4096" oninput="document.getElementById('valMaxTok').textContent=this.value" />
+            </div>
+
+            <div class="param-block">
+              <div class="param-head"><span>Response Format</span></div>
+              <select class="select" id="paramFormat">
+                <option value="text">text (default)</option>
+                <option value="json_object">json_object</option>
+              </select>
+            </div>
+
+            <div class="param-block">
+              <div class="param-head"><span>Stop Sequences (comma-separated)</span></div>
+              <input type="text" class="input mono" id="paramStop" placeholder="e.g. <|endoftext|>, ###" />
+            </div>
+
+            <div class="card" style="padding:12px;font-size:12px;color:var(--text-secondary);">
+              <div style="font-weight:600;color:var(--text-primary);margin-bottom:4px;">Local Data Guarantee</div>
+              All prompts, chat history, and generated assets are stored exclusively in local encrypted SQLite databases. Internal host details are masked.
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <!-- 2. CODE INTERPRETER SANDBOX VIEW -->
+      <section class="view-pane" id="view-sandbox">
+        <div class="scroll-page">
+          <div class="page-inner">
+            <div class="card">
+              <div class="card-header">
+                <div>
+                  <h2 class="card-title">Isolated Code Interpreter &amp; Runtime Sandbox</h2>
+                  <p style="font-size:13px;color:var(--text-secondary);">Execute Python 3, Node.js, or Bash scripts in a clean, ephemeral local workspace with masked environment variables.</p>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center;">
+                  <select class="select" id="sandboxLang" style="width:140px;" onchange="loadSandboxTemplate()">
+                    <option value="python">Python 3</option>
+                    <option value="node">Node.js</option>
+                    <option value="bash">Bash</option>
+                  </select>
+                  <button class="btn btn-accent" id="runSandboxBtn" onclick="executeSandbox()">Run Code</button>
+                </div>
+              </div>
+
+              <textarea id="sandboxCodeInput" class="textarea mono" rows="13" style="font-size:13px;line-height:1.55;background:var(--code-bg);">import math, statistics
+
+samples = [round(math.sin(x / 5.0) * 100, 2) for x in range(1, 25)]
+print("Samples:", samples[:8])
+print("Mean:", round(statistics.mean(samples), 3))
+print("Stdev:", round(statistics.stdev(samples), 3))</textarea>
+
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;gap:12px;flex-wrap:wrap;">
+                <input type="text" class="input mono" id="sandboxStdin" placeholder="Optional standard input (stdin)…" style="max-width:360px;" />
+                <div style="display:flex;gap:8px;align-items:center;">
+                  <span class="mono" style="font-size:12px;color:var(--text-secondary);" id="sandboxMetaLabel">Ready</span>
+                  <button class="btn btn-sm" onclick="sendSandboxToChat()">Send Output to Playground</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-header">
+                <h3 class="card-title">Execution Output</h3>
+                <span class="badge" id="sandboxExitBadge">exit: 0</span>
+              </div>
+              <pre class="code-panel mono" id="sandboxOutputPre">Run a script above to inspect stdout, stderr, and execution timing.</pre>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 3. TRACES & LOGS SPLIT INSPECTOR VIEW -->
+      <section class="view-pane" id="view-logs">
+        <div class="split-inspector">
+          <div class="inspector-list">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;gap:10px;flex-wrap:wrap;">
+              <div>
+                <h2 class="card-title">Request Traces &amp; Saved Conversations</h2>
+                <p style="font-size:12.5px;color:var(--text-secondary);">Click any request row to inspect full prompt, reasoning trace, tool calls, and token metrics.</p>
+              </div>
+              <div style="display:flex;gap:8px;">
+                <input type="text" class="input" id="logFilterInput" placeholder="Filter by action or user…" style="width:200px;" oninput="renderLogsTable()" />
+                <button class="btn btn-sm" onclick="refreshAllData()">Refresh</button>
+              </div>
+            </div>
+
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Actor</th>
+                    <th>Protocol / Action</th>
+                    <th>Status</th>
+                    <th>Latency</th>
+                    <th>Tokens</th>
+                  </tr>
+                </thead>
+                <tbody id="logsTableBody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <aside class="inspector-detail" id="traceInspectorDetail">
+            <h3 class="card-title">Trace Inspector</h3>
+            <p style="font-size:13px;color:var(--text-secondary);">Select a trace or audit row on the left to inspect its structured payload and response details.</p>
+            <pre class="code-panel mono" id="traceDetailPre">{
+  "status": "Select a log entry to inspect"
+}</pre>
+          </aside>
+        </div>
+      </section>
+
+      <!-- 4. USAGE & ACTIVITY VIEW -->
+      <section class="view-pane" id="view-usage">
+        <div class="scroll-page">
+          <div class="page-inner">
+            <div class="stats-row">
+              <div class="stat-box">
+                <div class="stat-label">Total API Requests</div>
+                <div class="stat-value mono" id="statTotalReqs">0</div>
+              </div>
+              <div class="stat-box">
+                <div class="stat-label">Total Tokens Processed</div>
+                <div class="stat-value mono" id="statTotalTokens">0</div>
+              </div>
+              <div class="stat-box">
+                <div class="stat-label">Average Latency</div>
+                <div class="stat-value mono" id="statAvgLatency">0 ms</div>
+              </div>
+              <div class="stat-box">
+                <div class="stat-label">Active Secret Keys</div>
+                <div class="stat-value mono" id="statActiveKeys">0</div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-header">
+                <h2 class="card-title">Protocol &amp; Tool Breakdown</h2>
+                <span class="badge badge-success">100% Local SQLite Telemetry</span>
+              </div>
+              <div id="usageCategoryList" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 5. STORAGE & MEDIA / IMAGE STUDIO VIEW -->
+      <section class="view-pane" id="view-storage">
+        <div class="scroll-page">
+          <div class="page-inner">
+            <div class="card">
+              <div class="card-header">
+                <div>
+                  <h2 class="card-title">Image Generation Studio &amp; API Tester (<code>/v1/images/generations</code>)</h2>
+                  <p style="font-size:13px;color:var(--text-secondary);">Synthesize high-resolution images directly or over the API. Every generated image is returned as a public URL (<code>https://kusi-qwen-api.vercel.app/files/&lt;id&gt;.png</code>) and optional <code>b64_json</code> payload.</p>
+                </div>
+              </div>
+              <div style="display:grid;grid-template-columns:1fr 160px auto;gap:10px;align-items:end;margin-bottom:12px;">
+                <div>
+                  <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Visual Prompt</label>
+                  <input type="text" class="input" id="directImgPrompt" placeholder="A minimalist architectural glass pavilion in a misty pine forest at dawn, 35mm photo" />
+                </div>
+                <div>
+                  <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Resolution</label>
+                  <select class="select mono" id="directImgSize">
+                    <option value="1024x1024">1024x1024</option>
+                    <option value="1024x768">1024x768</option>
+                    <option value="768x1024">768x1024</option>
+                    <option value="512x512">512x512</option>
+                  </select>
+                </div>
+                <button class="btn btn-accent" id="directImgBtn" onclick="generateImageDirectUI()">Generate Image</button>
+              </div>
+              <pre class="code-panel mono" id="directImgApiResult" style="display:none;margin-top:10px;"></pre>
+            </div>
+
+            <div class="card">
+              <div class="card-header">
+                <div>
+                  <h2 class="card-title">Local Generated Media &amp; Artifacts</h2>
+                  <p style="font-size:13px;color:var(--text-secondary);">Images generated via <code>/v1/images/generations</code>, <code>generate_image</code>, and <code>edit_image</code> stored locally on disk.</p>
+                </div>
+                <button class="btn btn-sm" onclick="loadStorageFiles()">Refresh Gallery</button>
+              </div>
+              <div class="media-grid" id="storageMediaGrid"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 6. API KEYS VIEW -->
+      <section class="view-pane" id="view-keys">
+        <div class="scroll-page">
+          <div class="page-inner">
+            <div class="card">
+              <div class="card-header">
+                <div>
+                  <h2 class="card-title">API Keys</h2>
+                  <p style="font-size:13px;color:var(--text-secondary);">Secret keys (<code>sk-ornith-...</code>) are hashed with SHA-256 in local SQLite storage and work across OpenAI SDK, Anthropic SDK, Claude Code, Codex, and the Ornith CLI.</p>
+                </div>
+              </div>
+
+              <div style="display:grid;grid-template-columns:1.5fr 1fr auto;gap:10px;align-items:end;margin-bottom:18px;">
+                <div>
+                  <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Key Label</label>
+                  <input type="text" class="input" id="newKeyName" placeholder="e.g. laptop-coding-cli or production-app" />
+                </div>
+                <div>
+                  <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Rate Limit (RPM)</label>
+                  <input type="number" class="input mono" id="newKeyRpm" value="120" min="5" max="600" />
+                </div>
+                <button class="btn btn-accent" onclick="createNewApiKey()">+ Create Secret Key</button>
+              </div>
+
+              <div id="newlyMintedKeyBanner" style="display:none;margin-bottom:16px;padding:14px;border-radius:8px;border:1px solid var(--accent);background:var(--accent-soft);">
+                <div style="font-weight:600;margin-bottom:4px;color:var(--accent);">Copy your new secret key now — it will not be shown again:</div>
+                <div style="display:flex;gap:8px;align-items:center;">
+                  <input type="text" class="input mono" id="newlyMintedKeyValue" readonly />
+                  <button class="btn btn-sm" onclick="copyTextValue('newlyMintedKeyValue')">Copy Key</button>
+                </div>
+              </div>
+
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Owner</th>
+                      <th>Secret Prefix</th>
+                      <th>RPM</th>
+                      <th>Requests</th>
+                      <th>Tokens</th>
+                      <th>Status</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="keysTableBody"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 7. TEAM & ACCESS VIEW (ADMIN) -->
+      <section class="view-pane" id="view-team">
+        <div class="scroll-page">
+          <div class="page-inner">
+            <div class="card">
+              <div class="card-header">
+                <div>
+                  <h2 class="card-title">Team Members &amp; Developer Access</h2>
+                  <p style="font-size:13px;color:var(--text-secondary);">Primary administrator <code>2024frank@gmail.com</code> can authorize developers for passwordless Resend 6-digit login across both the Web Studio and the <code>ornith</code> CLI.</p>
+                </div>
+              </div>
+
+              <div style="display:grid;grid-template-columns:1.3fr 1fr 0.8fr 0.7fr auto;gap:10px;align-items:end;margin-bottom:16px;">
+                <div>
+                  <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Developer Email</label>
+                  <input type="email" class="input" id="inviteEmail" placeholder="developer@example.com" />
+                </div>
+                <div>
+                  <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Full Name</label>
+                  <input type="text" class="input" id="inviteName" placeholder="Alex Rivera" />
+                </div>
+                <div>
+                  <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Role</label>
+                  <select class="select" id="inviteRole">
+                    <option value="developer">Developer</option>
+                    <option value="admin">Admin</option>
+                  </select>
+                </div>
+                <div>
+                  <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">RPM Limit</label>
+                  <input type="number" class="input mono" id="inviteRpm" value="90" />
+                </div>
+                <button class="btn btn-accent" onclick="inviteOrSaveUser()">Add / Invite User</button>
+              </div>
+
+              <div style="margin-bottom:16px;display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--text-secondary);">
+                <input type="checkbox" id="inviteSendEmail" checked />
+                <label for="inviteSendEmail">Send welcome invitation email via Resend</label>
+              </div>
+
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Email</th>
+                      <th>Name</th>
+                      <th>Role</th>
+                      <th>Status</th>
+                      <th>RPM</th>
+                      <th>Active Keys</th>
+                      <th>Requests</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody id="usersTableBody"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 8. CLI & CODING AGENT VIEW -->
+      <section class="view-pane" id="view-cli">
+        <div class="scroll-page">
+          <div class="page-inner">
+            <div class="card">
+              <div class="card-header">
+                <div>
+                  <h2 class="card-title">Ornith CLI &amp; Interactive Coding Agent</h2>
+                  <p style="font-size:13px;color:var(--text-secondary);">Install the standalone <code>ornith</code> CLI on any machine, choose how you want to authenticate (Developer Account via Resend 6-digit code OR API Key), and use it directly for coding.</p>
+                </div>
+                <span class="badge badge-success">v2.5 Ready</span>
+              </div>
+
+              <h3 style="font-size:14px;font-weight:600;margin:14px 0 6px;">Step 1 — Install the CLI</h3>
+              <pre class="code-panel mono">curl -fsSL https://kusi-qwen-api.vercel.app/install.sh | bash</pre>
+
+              <h3 style="font-size:14px;font-weight:600;margin:18px 0 6px;">Step 2 — Authenticate (Choose Account Login or API Key)</h3>
+              <p style="font-size:13px;color:var(--text-secondary);margin-bottom:8px;">Run <code>ornith login</code> to interactively select between signing in with your registered Developer Account (6-digit Resend code) or pasting an <code>sk-ornith-...</code> API key:</p>
+              <pre class="code-panel mono"># Interactive login selector (Account OTP or API Key)
+ornith login
+
+# Or authenticate directly with your Developer Account email (sends 6-digit Resend code):
+ornith login --account 2024frank@gmail.com
+
+# Or authenticate directly with an API Key:
+ornith login --api-key sk-ornith-YOUR_KEY
+
+# Verify your active local credentials:
+ornith whoami</pre>
+
+              <h3 style="font-size:14px;font-weight:600;margin:18px 0 6px;">Step 3 — Launch the Interactive Coding Agent</h3>
+              <p style="font-size:13px;color:var(--text-secondary);margin-bottom:8px;">Use <code>ornith code</code> inside any git repository to give Ornith-1.5-35B local file read/write/edit and test-execution tools:</p>
+              <pre class="code-panel mono"># Start interactive coding REPL in your current project directory
+ornith code
+
+# Or run a one-shot engineering task
+ornith code "Inspect this repository, add input validation to auth.py, and run pytest"
+
+# Multimodal vision, video, and sandbox commands
+ornith --image screenshot.png "Audit this UI layout and suggest CSS fixes"
+ornith --video demo.mp4 "Summarize the workflow shown in this clip"
+ornith sandbox --lang python "import math; print(math.factorial(20))"</pre>
+
+              <h3 style="font-size:14px;font-weight:600;margin:18px 0 6px;">Claude Code CLI &amp; OpenAI Codex CLI Wrappers</h3>
+              <pre class="code-panel mono"># Load your local Ornith environment variables into any shell
+source ~/.config/ornith/env.sh
+
+# Launch Claude Code powered by Ornith-1.5-35B-Uncensored (/v1/messages)
+claude-ornith
+
+# Launch OpenAI Codex CLI powered by Ornith-1.5-35B-Uncensored (/v1/responses)
+codex-ornith</pre>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 9. DOCUMENTATION & API REFERENCE VIEW -->
+      <section class="view-pane" id="view-docs">
+        <div class="scroll-page">
+          <div class="page-inner">
+            <div class="card">
+              <div class="card-header">
+                <div>
+                  <h2 class="card-title">Ornith Platform Documentation &amp; API Reference</h2>
+                  <p style="font-size:13px;color:var(--text-secondary);">Drop-in compatible with OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages protocols. All data lives locally with masked infrastructure.</p>
+                </div>
+              </div>
+
+              <div class="tab-strip">
+                <button class="tab-btn active" onclick="switchDocTab('quickstart', this)">Quickstart</button>
+                <button class="tab-btn" onclick="switchDocTab('images', this)">Image Generation API</button>
+                <button class="tab-btn" onclick="switchDocTab('multimodal', this)">Vision &amp; Video</button>
+                <button class="tab-btn" onclick="switchDocTab('tools', this)">Tools &amp; Guardrails</button>
+                <button class="tab-btn" onclick="switchDocTab('anthropic', this)">Anthropic &amp; Responses</button>
+              </div>
+
+              <div id="doc-tab-quickstart" class="doc-pane" style="margin-top:14px;">
+                <p style="font-size:13.5px;color:var(--text-secondary);margin-bottom:10px;">Authenticate with <code>Authorization: Bearer sk-ornith-...</code> against <code>https://kusi-qwen-api.vercel.app/v1</code> using any official OpenAI client library:</p>
+                <pre class="code-panel mono">from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://kusi-qwen-api.vercel.app/v1",
+    api_key="sk-ornith-YOUR_SECRET_KEY",
+)
+
+response = client.chat.completions.create(
+    model="ornith-1.5-35b-uncensored",
+    messages=[
+        {"role": "system", "content": "You are a principal systems engineer."},
+        {"role": "user", "content": "Implement a token bucket rate limiter in Python."},
+    ],
+    temperature=0.6,
+    stream=True,
+)
+
+for chunk in response:
+    print(chunk.choices[0].delta.content or "", end="", flush=True)</pre>
+              </div>
+
+              <div id="doc-tab-images" class="doc-pane" style="display:none;margin-top:14px;">
+                <p style="font-size:13.5px;color:var(--text-secondary);margin-bottom:10px;">How to generate and receive images over the API (3 ways):</p>
+                <pre class="code-panel mono"># 1. Direct OpenAI Images Endpoint (POST /v1/images/generations)
+# Returns {"created": ..., "data": [{"url": "https://kusi-qwen-api.vercel.app/files/&lt;id&gt;.png", "b64_json": "..."}]}
+curl -s https://kusi-qwen-api.vercel.app/v1/images/generations \
+  -H "Authorization: Bearer $ORNITH_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "A futuristic obsidian server vault lit by emerald neon",
+    "size": "1024x1024",
+    "response_format": "url"
+  }'
+
+# 2. Via Chat Completions (POST /v1/chat/completions)
+# When you ask the model to create or edit an image in chat, the response automatically includes:
+# - choices[0].message.content: Markdown link ![Generated Image](https://kusi-qwen-api.vercel.app/files/&lt;id&gt;.png)
+# - choices[0].message.images: ["https://kusi-qwen-api.vercel.app/files/&lt;id&gt;.png"]
+# - top-level "images":        ["https://kusi-qwen-api.vercel.app/files/&lt;id&gt;.png"]
+
+# 3. Via the Ornith CLI
+ornith image "A cyberpunk owl perched on a terminal" --out owl.png</pre>
+              </div>
+
+              <div id="doc-tab-multimodal" class="doc-pane" style="display:none;margin-top:14px;">
+                <p style="font-size:13.5px;color:var(--text-secondary);margin-bottom:10px;">Pass images as <code>image_url</code> data URIs or HTTPS URLs. For video files, extract keyframes via <code>POST /api/media/extract-frames</code> or pass <code>--video clip.mp4</code> in the <code>ornith</code> CLI:</p>
+                <pre class="code-panel mono">curl -s https://kusi-qwen-api.vercel.app/v1/chat/completions \
+  -H "Authorization: Bearer $ORNITH_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "ornith-1.5-35b-uncensored",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Extract all metrics and layout details from this image."},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}
+      ]
+    }]
+  }'</pre>
+              </div>
+
+              <div id="doc-tab-tools" class="doc-pane" style="display:none;margin-top:14px;">
+                <p style="font-size:13.5px;color:var(--text-secondary);margin-bottom:10px;">Ornith-1.5-35B-Uncensored executes code inside a Linux kernel Bubblewrap (<code>bwrap --unshare-all</code>) container jail. The model is completely uncensored for all user tasks while strictly blocking any access to host <code>.env</code> files, credentials, SSH keys, or host filesystem paths:</p>
+                <pre class="code-panel mono"># Built-in Autonomous Tools:
+# - web_search(query)              : Live web search
+# - read_webpage(url)              : SSRF-guarded public webpage reader (blocks file:// & private IPs)
+# - run_sandbox_code(language,code): Kernel-jailed container (/workspace, unshared net/fs/pid/env)
+# - generate_image(prompt)         : Image synthesis returning public /files/&lt;id&gt;.png URLs
+# - edit_image(instruction)        : Image transformation
+
+curl -s https://kusi-qwen-api.vercel.app/api/sandbox/run \
+  -H "Authorization: Bearer $ORNITH_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "sandbox", "language": "python", "code": "print(2 ** 64)"}'</pre>
+              </div>
+
+              <div id="doc-tab-anthropic" class="doc-pane" style="display:none;margin-top:14px;">
+                <p style="font-size:13.5px;color:var(--text-secondary);margin-bottom:10px;">Native support for Anthropic <code>POST /v1/messages</code> and OpenAI Responses <code>POST /v1/responses</code>:</p>
+                <pre class="code-panel mono">import anthropic
+
+client = anthropic.Anthropic(
+    base_url="https://kusi-qwen-api.vercel.app",
+    api_key="sk-ornith-YOUR_SECRET_KEY",
+)
+
+msg = client.messages.create(
+    model="ornith-1.5-35b-uncensored",
+    max_tokens=2048,
+    messages=[{"role": "user", "content": "Explain MVCC snapshot isolation."}],
+)
+print(msg.content[0].text)</pre>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- ── Authentication Modal (Account Resend OTP OR API Key) ───────── -->
+  <div class="modal-backdrop" id="authModal">
+    <div class="modal-card">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div>
+          <h2 style="font-size:18px;font-weight:600;">Sign in to Ornith Studio</h2>
+          <p style="font-size:12.5px;color:var(--text-secondary);">Authenticate with your Developer Account (Resend 6-digit code) or an API key.</p>
+        </div>
+        <button class="btn btn-sm" onclick="closeAuthModal()">Close</button>
+      </div>
+
+      <div class="tab-strip">
+        <button class="tab-btn active" id="authTabAccountBtn" onclick="switchAuthTab('account')">Developer Account (6-Digit Code)</button>
+        <button class="tab-btn" id="authTabKeyBtn" onclick="switchAuthTab('key')">API Key</button>
+      </div>
+
+      <!-- Account OTP Flow -->
+      <div id="authFlowAccount" style="display:flex;flex-direction:column;gap:12px;">
+        <div>
+          <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Developer Email</label>
+          <input type="email" class="input" id="loginEmailInput" value="2024frank@gmail.com" placeholder="2024frank@gmail.com" />
+        </div>
+        <button class="btn btn-primary" id="sendOtpBtn" onclick="requestOtpCode()">Send 6-Digit Verification Code via Resend</button>
+
+        <div id="otpVerifyBox" style="display:none;flex-direction:column;gap:10px;padding-top:8px;border-top:1px solid var(--border);">
+          <label style="font-size:12px;color:var(--text-secondary);">Enter 6-Digit Code Sent to Your Email</label>
+          <input type="text" class="input mono" id="loginCodeInput" maxlength="6" placeholder="123456" style="font-size:18px;letter-spacing:0.25em;text-align:center;" />
+          <button class="btn btn-accent" onclick="verifyOtpCode()">Verify &amp; Sign In</button>
+        </div>
+      </div>
+
+      <!-- API Key Flow -->
+      <div id="authFlowKey" style="display:none;flex-direction:column;gap:12px;">
+        <div>
+          <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Secret API Key</label>
+          <input type="password" class="input mono" id="loginApiKeyInput" placeholder="sk-ornith-..." />
+        </div>
+        <button class="btn btn-accent" onclick="signInWithApiKey()">Authenticate with API Key</button>
+      </div>
+
+      <div id="authStatusMsg" style="font-size:12.5px;color:var(--text-secondary);"></div>
+    </div>
+  </div>
+
+  <!-- ── View Code Modal (OpenAI Studio Equivalent Request Snippet) ── -->
+  <div class="modal-backdrop" id="viewCodeModal">
+    <div class="modal-card wide">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <h2 style="font-size:17px;font-weight:600;">View Code — Current Playground Configuration</h2>
+        <button class="btn btn-sm" onclick="document.getElementById('viewCodeModal').classList.remove('open')">Close</button>
+      </div>
+      <div class="tab-strip">
+        <button class="tab-btn active" onclick="renderViewCode('python', this)">Python (OpenAI SDK)</button>
+        <button class="tab-btn" onclick="renderViewCode('curl', this)">cURL</button>
+        <button class="tab-btn" onclick="renderViewCode('cli', this)">Ornith CLI</button>
+      </div>
+      <pre class="code-panel mono" id="viewCodePre"></pre>
+    </div>
+  </div>
+
+  <!-- ── Custom Function JSON Modal ─────────────────────────────────── -->
+  <div class="modal-backdrop" id="customFnModal">
+    <div class="modal-card wide">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <h2 style="font-size:17px;font-weight:600;">Custom OpenAI Function Schema (Optional)</h2>
+        <button class="btn btn-sm" onclick="document.getElementById('customFnModal').classList.remove('open')">Done</button>
+      </div>
+      <p style="font-size:12.5px;color:var(--text-secondary);">Paste a JSON array of OpenAI function tool definitions to test structured tool calling in the Playground. Leave empty to use built-in autonomous tools.</p>
+      <textarea class="textarea mono" id="customFnTextarea" rows="10" placeholder='[
+  {
+    "type": "function",
+    "function": {
+      "name": "get_stock_quote",
+      "description": "Fetch real-time ticker quote",
+      "parameters": {
+        "type": "object",
+        "properties": {"ticker": {"type": "string"}},
+        "required": ["ticker"]
+      }
+    }
+  }
+]'></textarea>
+    </div>
+  </div>
+
+  <script>
+    const state = {
+      authenticated: false,
+      user: null,
+      apiKey: localStorage.getItem('ornith_api_key') || '',
+      presets: [],
+      keys: [],
+      logs: [],
+      users: [],
+      messagesA: [],
+      messagesB: [],
+      attachments: [],
+      compareMode: false,
+    };
+
+    function authHeaders() {
+      const h = { 'Content-Type': 'application/json' };
+      if (state.apiKey) h['Authorization'] = 'Bearer ' + state.apiKey;
+      return h;
+    }
+
+    function escapeHtml(str) {
+      return String(str || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    }
+
+    function formatMarkdown(text) {
+      let html = escapeHtml(text);
+      html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => `<pre><code>${code.trim()}</code></pre>`);
+      html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" />');
+      html = html.replace(/`([^`\n]+)`/g, '<code class="mono" style="background:var(--bg-control);padding:2px 5px;border-radius:4px;">$1</code>');
+      html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+      html = html.replace(/\n/g, '<br/>');
+      return html;
+    }
+
+    // ── Theme Toggle ──────────────────────────────────────────────────
+    function initTheme() {
+      const saved = localStorage.getItem('ornith_theme') || 'dark';
+      document.documentElement.setAttribute('data-theme', saved);
+    }
+
+    function toggleTheme() {
+      const cur = document.documentElement.getAttribute('data-theme') || 'dark';
+      const next = cur === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', next);
+      localStorage.setItem('ornith_theme', next);
+    }
+
+    // ── Navigation ────────────────────────────────────────────────────
+    const viewTitles = {
+      playground: 'Playground',
+      sandbox: 'Code Interpreter Sandbox',
+      logs: 'Traces & Logs',
+      usage: 'Usage & Activity',
+      storage: 'Storage & Media',
+      keys: 'API Keys',
+      team: 'Team & Access',
+      cli: 'CLI & Coding Agent',
+      docs: 'Documentation & API Reference',
+    };
+
+    function switchView(viewId) {
+      document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.view === viewId));
+      document.querySelectorAll('.view-pane').forEach(p => p.classList.toggle('active', p.id === 'view-' + viewId));
+      document.getElementById('topbarTitle').textContent = viewTitles[viewId] || 'Ornith Studio';
+      if (viewId === 'usage') loadUsageStats();
+      if (viewId === 'storage') loadStorageFiles();
+      if (viewId === 'logs') refreshAllData();
+    }
+
+    // ── Bootstrap & Auth State ────────────────────────────────────────
+    async function refreshAllData() {
+      try {
+        const r = await fetch('/api/auth/me', { headers: authHeaders() });
+        const data = await r.json();
+        const hw = data.hardware || {};
+        const dot = document.getElementById('modelStatusDot');
+        const lbl = document.getElementById('modelStatusLabel');
+        if (hw.online) {
+          dot.classList.remove('offline');
+          lbl.textContent = 'Ornith-1.5-35B Ready';
+        } else {
+          dot.classList.add('offline');
+          lbl.textContent = 'Model Warming';
+        }
+
+        state.authenticated = Boolean(data.authenticated);
+        state.user = data.user || null;
+        state.keys = data.keys || [];
+        state.logs = data.logs || [];
+        state.users = data.users || [];
+        state.presets = data.presets || [];
+
+        if (state.authenticated && state.user) {
+          document.getElementById('sidebarUserEmail').textContent = state.user.email;
+          document.getElementById('sidebarUserRole').textContent = state.user.role;
+          document.getElementById('sidebarAuthBtn').textContent = 'Sign Out';
+          document.getElementById('sidebarAuthBtn').onclick = logoutSession;
+          document.getElementById('navTeamBtn').style.display = state.user.role === 'admin' ? 'flex' : 'none';
+          populatePresetsDropdown();
+          renderKeysTable();
+          renderLogsTable();
+          renderUsersTable();
+        } else {
+          document.getElementById('sidebarUserEmail').textContent = 'Sign in required';
+          document.getElementById('sidebarUserRole').textContent = 'Locked';
+          document.getElementById('sidebarAuthBtn').textContent = 'Sign In';
+          document.getElementById('sidebarAuthBtn').onclick = openAuthModal;
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    function openAuthModal() {
+      document.getElementById('authModal').classList.add('open');
+    }
+
+    function closeAuthModal() {
+      document.getElementById('authModal').classList.remove('open');
+    }
+
+    function switchAuthTab(mode) {
+      document.getElementById('authTabAccountBtn').classList.toggle('active', mode === 'account');
+      document.getElementById('authTabKeyBtn').classList.toggle('active', mode === 'key');
+      document.getElementById('authFlowAccount').style.display = mode === 'account' ? 'flex' : 'none';
+      document.getElementById('authFlowKey').style.display = mode === 'key' ? 'flex' : 'none';
+      document.getElementById('authStatusMsg').textContent = '';
+    }
+
+    async function requestOtpCode() {
+      const email = document.getElementById('loginEmailInput').value.trim();
+      const msgEl = document.getElementById('authStatusMsg');
+      msgEl.textContent = 'Sending 6-digit verification code via Resend…';
+      try {
+        const r = await fetch('/api/auth/request-code', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email }),
+        });
+        const d = await r.json();
+        if (!r.ok) {
+          msgEl.style.color = 'var(--danger)';
+          msgEl.textContent = (d.error && d.error.message) || d.error || 'Failed to send code.';
+          return;
+        }
+        msgEl.style.color = 'var(--success)';
+        msgEl.textContent = d.message || 'Verification code sent! Check your inbox.';
+        document.getElementById('otpVerifyBox').style.display = 'flex';
+      } catch (e) {
+        msgEl.style.color = 'var(--danger)';
+        msgEl.textContent = 'Request failed: ' + e.message;
+      }
+    }
+
+    async function verifyOtpCode() {
+      const email = document.getElementById('loginEmailInput').value.trim();
+      const code = document.getElementById('loginCodeInput').value.trim();
+      const msgEl = document.getElementById('authStatusMsg');
+      msgEl.textContent = 'Verifying code…';
+      try {
+        const r = await fetch('/api/auth/verify-code', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, code }),
+        });
+        const d = await r.json();
+        if (!r.ok) {
+          msgEl.style.color = 'var(--danger)';
+          msgEl.textContent = (d.error && d.error.message) || d.error || 'Verification failed.';
+          return;
+        }
+        closeAuthModal();
+        await refreshAllData();
+      } catch (e) {
+        msgEl.style.color = 'var(--danger)';
+        msgEl.textContent = 'Error: ' + e.message;
+      }
+    }
+
+    async function signInWithApiKey() {
+      const key = document.getElementById('loginApiKeyInput').value.trim();
+      const msgEl = document.getElementById('authStatusMsg');
+      if (!key) return;
+      state.apiKey = key;
+      localStorage.setItem('ornith_api_key', key);
+      await refreshAllData();
+      if (state.authenticated) {
+        closeAuthModal();
+      } else {
+        msgEl.style.color = 'var(--danger)';
+        msgEl.textContent = 'Invalid or revoked API key.';
+      }
+    }
+
+    async function logoutSession() {
+      await fetch('/api/auth/logout', { method: 'POST', headers: authHeaders() });
+      state.apiKey = '';
+      localStorage.removeItem('ornith_api_key');
+      state.authenticated = false;
+      await refreshAllData();
+      openAuthModal();
+    }
+
+    // ── Presets & Playground Controls ─────────────────────────────────
+    function populatePresetsDropdown() {
+      const sel = document.getElementById('presetSelect');
+      sel.innerHTML = '<option value="">Load Studio Preset…</option>';
+      state.presets.forEach(p => {
+        const opt = document.createElement('option');
+        opt.value = p.id;
+        opt.textContent = p.name;
+        sel.appendChild(opt);
+      });
+    }
+
+    function applySelectedPreset() {
+      const pid = document.getElementById('presetSelect').value;
+      const p = state.presets.find(x => x.id === pid);
+      if (!p) return;
+      document.getElementById('systemPromptInput').value = p.system_prompt || '';
+      document.getElementById('paramTemp').value = p.temperature ?? 0.6;
+      document.getElementById('valTemp').textContent = Number(p.temperature ?? 0.6).toFixed(2);
+      document.getElementById('paramTopP').value = p.top_p ?? 0.95;
+      document.getElementById('valTopP').textContent = Number(p.top_p ?? 0.95).toFixed(2);
+      document.getElementById('paramMaxTok').value = p.max_tokens ?? 4096;
+      document.getElementById('valMaxTok').textContent = p.max_tokens ?? 4096;
+    }
+
+    async function saveCurrentPreset() {
+      if (!state.authenticated) return openAuthModal();
+      const name = prompt('Enter a name for this Studio Preset:');
+      if (!name) return;
+      const r = await fetch('/api/presets', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({
+          name,
+          system_prompt: document.getElementById('systemPromptInput').value,
+          temperature: parseFloat(document.getElementById('paramTemp').value),
+          top_p: parseFloat(document.getElementById('paramTopP').value),
+          max_tokens: parseInt(document.getElementById('paramMaxTok').value, 10),
+          enable_thinking: document.getElementById('toggleThink').classList.contains('active'),
+        }),
+      });
+      if (r.ok) await refreshAllData();
+    }
+
+    function toggleCompareMode() {
+      state.compareMode = !state.compareMode;
+      const grid = document.getElementById('streamsGrid');
+      const colB = document.getElementById('chatColB');
+      const btn = document.getElementById('compareToggleBtn');
+      grid.classList.toggle('compare-mode', state.compareMode);
+      colB.style.display = state.compareMode ? 'flex' : 'none';
+      btn.classList.toggle('btn-accent', state.compareMode);
+    }
+
+    function toggleParamDrawer() {
+      document.getElementById('paramDrawer').classList.toggle('collapsed');
+    }
+
+    function toggleChip(btn) {
+      btn.classList.toggle('active');
+    }
+
+    function fillPrompt(txt) {
+      document.getElementById('chatInput').value = txt;
+      document.getElementById('chatInput').focus();
+    }
+
+    function clearPlayground() {
+      state.messagesA = [];
+      state.messagesB = [];
+      state.attachments = [];
+      document.getElementById('attachmentStrip').innerHTML = '';
+      document.getElementById('chatMessagesA').innerHTML = document.getElementById('emptyStateA') ? document.getElementById('emptyStateA').outerHTML : '';
+      document.getElementById('chatMessagesB').innerHTML = '';
+    }
+
+    async function handleMediaAttach(ev) {
+      const file = ev.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = async () => {
+        const b64 = reader.result;
+        if (file.type.startsWith('video/')) {
+          const r = await fetch('/api/media/extract-frames', {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({ video_base64: b64, ext: '.mp4', max_frames: 4 }),
+          });
+          const d = await r.json();
+          (d.frames || []).forEach((f, idx) => {
+            state.attachments.push({ name: `${file.name} [frame ${idx + 1}]`, url: f });
+          });
+        } else {
+          state.attachments.push({ name: file.name, url: b64 });
+        }
+        renderAttachmentStrip();
+      };
+      reader.readAsDataURL(file);
+    }
+
+    function renderAttachmentStrip() {
+      const strip = document.getElementById('attachmentStrip');
+      strip.innerHTML = state.attachments.map((a, i) => `
+        <span class="att-chip">
+          <span>${escapeHtml(a.name)}</span>
+          <button type="button" style="border:none;background:none;cursor:pointer;color:var(--text-muted);" onclick="state.attachments.splice(${i},1);renderAttachmentStrip()">×</button>
+        </span>
+      `).join('');
+    }
+
+    function handleComposerKey(ev) {
+      if (ev.key === 'Enter' && !ev.shiftKey) {
+        ev.preventDefault();
+        sendPlaygroundMessage();
+      }
+    }
+
+    async function sendPlaygroundMessage() {
+      if (!state.authenticated) return openAuthModal();
+      const inputEl = document.getElementById('chatInput');
+      const text = inputEl.value.trim();
+      if (!text && state.attachments.length === 0) return;
+
+      const emptyEl = document.getElementById('emptyStateA');
+      if (emptyEl) emptyEl.remove();
+
+      let userContent = text;
+      if (state.attachments.length > 0) {
+        userContent = [
+          { type: 'text', text: text || 'Analyze the attached media.' },
+          ...state.attachments.map(a => ({ type: 'image_url', image_url: { url: a.url } })),
+        ];
+      }
+
+      state.messagesA.push({ role: 'user', content: userContent });
+      state.messagesB.push({ role: 'user', content: userContent });
+      inputEl.value = '';
+      state.attachments = [];
+      renderAttachmentStrip();
+
+      appendMessageBubble('chatMessagesA', 'user', text || '[Attached Media]');
+      if (state.compareMode) appendMessageBubble('chatMessagesB', 'user', text || '[Attached Media]');
+
+      const enabledTools = Array.from(document.querySelectorAll('.chip-toggle[data-tool].active')).map(el => el.dataset.tool);
+      const enableThinking = document.getElementById('toggleThink').classList.contains('active');
+
+      const tasks = [
+        streamCompletion('chatMessagesA', state.messagesA, {
+          temperature: parseFloat(document.getElementById('paramTemp').value),
+          top_p: parseFloat(document.getElementById('paramTopP').value),
+          max_tokens: parseInt(document.getElementById('paramMaxTok').value, 10),
+          enableThinking,
+          enabledTools,
+        }),
+      ];
+
+      if (state.compareMode) {
+        tasks.push(
+          streamCompletion('chatMessagesB', state.messagesB, {
+            temperature: 0.2,
+            top_p: 0.9,
+            max_tokens: parseInt(document.getElementById('paramMaxTok').value, 10),
+            enableThinking: false,
+            enabledTools,
+          })
+        );
+      }
+
+      await Promise.all(tasks);
+      refreshAllData();
+    }
+
+    function appendMessageBubble(containerId, role, text) {
+      const wrap = document.getElementById(containerId);
+      const row = document.createElement('div');
+      row.className = 'msg-row ' + role;
+      row.innerHTML = `
+        <div class="msg-role">${role === 'user' ? 'You' : 'Ornith-1.5-35B'}</div>
+        <div class="msg-bubble">${formatMarkdown(text)}</div>
+      `;
+      wrap.appendChild(row);
+      wrap.parentElement.scrollTop = wrap.parentElement.scrollHeight;
+      return row;
+    }
+
+    async function streamCompletion(containerId, historyList, opts) {
+      const wrap = document.getElementById(containerId);
+      const row = document.createElement('div');
+      row.className = 'msg-row assistant';
+      row.innerHTML = `
+        <div class="msg-role">Ornith-1.5-35B</div>
+        <div class="tool-traces"></div>
+        <details class="thinking-acc" style="display:none;">
+          <summary>Reasoning Trace</summary>
+          <div class="thinking-body mono"></div>
+        </details>
+        <div class="msg-bubble">…</div>
+      `;
+      wrap.appendChild(row);
+
+      const thinkAcc = row.querySelector('.thinking-acc');
+      const thinkBody = row.querySelector('.thinking-body');
+      const bubble = row.querySelector('.msg-bubble');
+      const toolTraces = row.querySelector('.tool-traces');
+
+      const sysPrompt = document.getElementById('systemPromptInput').value.trim();
+      const messages = sysPrompt ? [{ role: 'system', content: sysPrompt }, ...historyList] : [...historyList];
+
+      const payload = {
+        model: document.getElementById('paramModel').value,
+        messages,
+        temperature: opts.temperature,
+        top_p: opts.top_p,
+        max_tokens: opts.max_tokens,
+        stream: true,
+        server_tools: opts.enabledTools.length > 0,
+        enabled_tools: opts.enabledTools,
+        chat_template_kwargs: { enable_thinking: opts.enableThinking },
+      };
+
+      const customFnsRaw = document.getElementById('customFnTextarea').value.trim();
+      if (customFnsRaw) {
+        try {
+          payload.tools = JSON.parse(customFnsRaw);
+          payload.server_tools = false;
+        } catch (e) {}
+      }
+
+      const t0 = performance.now();
+      let fullText = '';
+      let fullThink = '';
+
+      try {
+        const resp = await fetch('/v1/chat/completions', {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify(payload),
+        });
+
+        if (!resp.ok) {
+          const errTxt = await resp.text();
+          bubble.innerHTML = `<span style="color:var(--danger);">Error (${resp.status}): ${escapeHtml(errTxt)}</span>`;
+          return;
+        }
+
+        const reader = resp.body.getReader();
+        const dec = new TextDecoder();
+        let buf = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          const lines = buf.split('\n');
+          buf = lines.pop() || '';
+
+          for (const line of lines) {
+            if (!line.startsWith('data:')) continue;
+            const raw = line.slice(5).trim();
+            if (!raw || raw === '[DONE]') continue;
+            try {
+              const ev = JSON.parse(raw);
+              if (ev.ornith_tool_event && ev.ornith_tool_event.phase === 'start') {
+                const pill = document.createElement('span');
+                pill.className = 'tool-pill-trace mono';
+                pill.textContent = `⚡ ${ev.ornith_tool_event.tool}`;
+                toolTraces.appendChild(pill);
+              }
+              const delta = ((ev.choices || [])[0] || {}).delta || {};
+              if (delta.reasoning_content) {
+                fullThink += delta.reasoning_content;
+                thinkAcc.style.display = 'block';
+                thinkBody.textContent = fullThink.trim();
+              }
+              if (delta.content) {
+                fullText += delta.content;
+                bubble.innerHTML = formatMarkdown(fullText);
+              }
+            } catch (e) {}
+          }
+          wrap.parentElement.scrollTop = wrap.parentElement.scrollHeight;
+        }
+
+        historyList.push({ role: 'assistant', content: fullText });
+        const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+        document.getElementById('chatLatencyBadge').textContent = `${elapsed}s`;
+      } catch (e) {
+        bubble.innerHTML = `<span style="color:var(--danger);">Stream error: ${escapeHtml(e.message)}</span>`;
+      }
+    }
+
+    // ── View Code Modal ───────────────────────────────────────────────
+    function openViewCodeModal() {
+      document.getElementById('viewCodeModal').classList.add('open');
+      renderViewCode('python', document.querySelector('#viewCodeModal .tab-btn'));
+    }
+
+    function renderViewCode(lang, btnEl) {
+      if (btnEl) {
+        document.querySelectorAll('#viewCodeModal .tab-btn').forEach(b => b.classList.remove('active'));
+        btnEl.classList.add('active');
+      }
+      const sys = document.getElementById('systemPromptInput').value.trim();
+      const temp = document.getElementById('paramTemp').value;
+      const maxTok = document.getElementById('paramMaxTok').value;
+      const model = document.getElementById('paramModel').value;
+      const pre = document.getElementById('viewCodePre');
+
+      if (lang === 'python') {
+        pre.textContent = `from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://kusi-qwen-api.vercel.app/v1",
+    api_key="sk-ornith-YOUR_API_KEY",
+)
+
+response = client.chat.completions.create(
+    model="${model}",
+    messages=[
+        {"role": "system", "content": ${JSON.stringify(sys)}},
+        {"role": "user", "content": "Hello Ornith!"}
+    ],
+    temperature=${temp},
+    max_tokens=${maxTok},
+)
+print(response.choices[0].message.content)`;
+      } else if (lang === 'curl') {
+        pre.textContent = `curl https://kusi-qwen-api.vercel.app/v1/chat/completions \\
+  -H "Authorization: Bearer $ORNITH_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "${model}",
+    "messages": [
+      {"role": "system", "content": ${JSON.stringify(sys)}},
+      {"role": "user", "content": "Hello Ornith!"}
+    ],
+    "temperature": ${temp},
+    "max_tokens": ${maxTok}
+  }'`;
+      } else {
+        pre.textContent = `# 1. Install the Ornith CLI
+curl -fsSL https://kusi-qwen-api.vercel.app/install.sh | bash
+
+# 2. Authenticate via Developer Account (Resend 6-digit code) OR API Key
+ornith login
+
+# 3. Run prompt or start interactive Coding Agent
+ornith -s ${JSON.stringify(sys)} "Hello Ornith!"
+ornith code`;
+      }
+    }
+
+    function openCustomFnModal() {
+      document.getElementById('customFnModal').classList.add('open');
+    }
+
+    // ── Code Interpreter Sandbox ──────────────────────────────────────
+    function loadSandboxTemplate() {
+      const lang = document.getElementById('sandboxLang').value;
+      const area = document.getElementById('sandboxCodeInput');
+      if (lang === 'python') {
+        area.value = `import math, statistics\nsamples = [round(math.sin(x / 5.0) * 100, 2) for x in range(1, 25)]\nprint("Mean:", round(statistics.mean(samples), 3))`;
+      } else if (lang === 'node') {
+        area.value = `const crypto = require('crypto');\nconsole.log("Node Runtime:", process.version);\nconsole.log("SHA-256:", crypto.createHash('sha256').update('Ornith Studio').digest('hex'));`;
+      } else {
+        area.value = `uname -srm\npython3 --version\necho "Isolated workspace ready."`;
+      }
+    }
+
+    async function executeSandbox() {
+      if (!state.authenticated) return openAuthModal();
+      const lang = document.getElementById('sandboxLang').value;
+      const code = document.getElementById('sandboxCodeInput').value;
+      const stdin = document.getElementById('sandboxStdin').value;
+      const btn = document.getElementById('runSandboxBtn');
+      btn.textContent = 'Running…';
+      try {
+        const r = await fetch('/api/sandbox/run', {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({ mode: 'sandbox', language: lang, code, stdin, timeout: 25 }),
+        });
+        const d = await r.json();
+        document.getElementById('sandboxMetaLabel').textContent = `${d.language || lang} · ${d.duration_ms || 0} ms`;
+        const badge = document.getElementById('sandboxExitBadge');
+        badge.textContent = `exit: ${d.exit_code ?? 0}`;
+        badge.className = 'badge ' + (d.exit_code === 0 ? 'badge-success' : 'badge-danger');
+        document.getElementById('sandboxOutputPre').textContent = ((d.stdout || '') + (d.stderr ? '\n[stderr]\n' + d.stderr : '')).trim() || '(no output)';
+      } finally {
+        btn.textContent = 'Run Code';
+      }
+    }
+
+    function sendSandboxToChat() {
+      const code = document.getElementById('sandboxCodeInput').value;
+      const out = document.getElementById('sandboxOutputPre').textContent;
+      switchView('playground');
+      fillPrompt(`Here is my sandbox script and output:\n\`\`\`\n${code}\n\`\`\`\nOutput:\n\`\`\`\n${out}\n\`\`\`\nAnalyze or optimize this code.`);
+    }
+
+    // ── Traces, Usage, Storage, Keys & Team Tables ────────────────────
+    function renderLogsTable() {
+      const q = (document.getElementById('logFilterInput')?.value || '').toLowerCase();
+      const tbody = document.getElementById('logsTableBody');
+      if (!tbody) return;
+      const filtered = state.logs.filter(l => !q || (l.action || '').toLowerCase().includes(q) || (l.actor || '').toLowerCase().includes(q));
+      tbody.innerHTML = filtered.map((l, idx) => {
+        const dt = new Date((l.ts || 0) * 1000).toLocaleTimeString();
+        const badgeCls = l.status < 400 ? 'badge-success' : 'badge-danger';
+        return `
+          <tr class="clickable-row" onclick="inspectTrace(${idx})">
+            <td class="mono">${dt}</td>
+            <td>${escapeHtml(l.actor)}</td>
+            <td class="mono">${escapeHtml(l.action)}</td>
+            <td><span class="badge ${badgeCls}">${l.status}</span></td>
+            <td class="mono">${Math.round(l.latency_ms || 0)} ms</td>
+            <td class="mono">${(l.tokens_in || 0) + (l.tokens_out || 0)}</td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    async function inspectTrace(idx) {
+      const l = state.logs[idx];
+      if (!l) return;
+      const pre = document.getElementById('traceDetailPre');
+      let parsedDetail = l.detail;
+      try { parsedDetail = JSON.parse(l.detail); } catch (e) {}
+      if (parsedDetail && parsedDetail.chat_id) {
+        try {
+          const r = await fetch('/v1/chats/' + parsedDetail.chat_id, { headers: authHeaders() });
+          if (r.ok) {
+            const fullChat = await r.json();
+            pre.textContent = JSON.stringify({ audit: l, conversation: fullChat }, null, 2);
+            return;
+          }
+        } catch (e) {}
+      }
+      pre.textContent = JSON.stringify({ ...l, detail: parsedDetail }, null, 2);
+    }
+
+    async function loadUsageStats() {
+      if (!state.authenticated) return;
+      const r = await fetch('/api/usage', { headers: authHeaders() });
+      if (!r.ok) return;
+      const d = await r.json();
+      document.getElementById('statTotalReqs').textContent = (d.total_requests || 0).toLocaleString();
+      document.getElementById('statTotalTokens').textContent = (d.total_tokens || 0).toLocaleString();
+      document.getElementById('statAvgLatency').textContent = `${d.avg_latency_ms || 0} ms`;
+      document.getElementById('statActiveKeys').textContent = d.active_keys || 0;
+
+      const catBox = document.getElementById('usageCategoryList');
+      const cats = d.by_category || {};
+      catBox.innerHTML = Object.keys(cats).map(k => `
+        <div class="stat-box">
+          <div class="stat-label">${escapeHtml(k.toUpperCase())}</div>
+          <div class="stat-value mono">${cats[k]}</div>
+        </div>
+      `).join('') || '<div style="color:var(--text-secondary);">No activity recorded yet.</div>';
+    }
+
+    async function generateImageDirectUI() {
+      if (!state.authenticated) return openAuthModal();
+      const prompt = document.getElementById('directImgPrompt').value.trim();
+      const size = document.getElementById('directImgSize').value;
+      const btn = document.getElementById('directImgBtn');
+      const pre = document.getElementById('directImgApiResult');
+      if (!prompt) return;
+      btn.textContent = 'Synthesizing…';
+      pre.style.display = 'block';
+      pre.textContent = 'POST /v1/images/generations running…';
+      try {
+        const r = await fetch('/v1/images/generations', {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({ prompt, size, response_format: 'url' }),
+        });
+        const d = await r.json();
+        pre.textContent = JSON.stringify(d, null, 2);
+        await loadStorageFiles();
+      } catch (e) {
+        pre.textContent = 'Error: ' + e.message;
+      } finally {
+        btn.textContent = 'Generate Image';
+      }
+    }
+
+    async function loadStorageFiles() {
+      if (!state.authenticated) return;
+      const r = await fetch('/api/files', { headers: authHeaders() });
+      if (!r.ok) return;
+      const d = await r.json();
+      const grid = document.getElementById('storageMediaGrid');
+      const files = d.files || [];
+      grid.innerHTML = files.map(f => `
+        <div class="media-item">
+          <img src="${f.url}" alt="${escapeHtml(f.name)}" loading="lazy" />
+          <div class="media-meta">
+            <span class="mono" style="font-size:11px;">${escapeHtml(f.name.slice(0, 14))}…</span>
+            <a href="${f.url}" target="_blank" class="btn btn-sm">Open</a>
+          </div>
+        </div>
+      `).join('') || '<div style="color:var(--text-secondary);">No generated images yet. Use Image Gen in the Playground to synthesize media.</div>';
+    }
+
+    function renderKeysTable() {
+      const tbody = document.getElementById('keysTableBody');
+      if (!tbody) return;
+      tbody.innerHTML = state.keys.map(k => `
+        <tr>
+          <td style="font-weight:600;">${escapeHtml(k.name)}</td>
+          <td>${escapeHtml(k.user_email)}</td>
+          <td class="mono">${escapeHtml(k.key_prefix)}</td>
+          <td class="mono">${k.rate_limit_rpm}</td>
+          <td class="mono">${k.total_requests || 0}</td>
+          <td class="mono">${((k.total_tokens_in || 0) + (k.total_tokens_out || 0)).toLocaleString()}</td>
+          <td><span class="badge ${k.revoked ? 'badge-danger' : 'badge-success'}">${k.revoked ? 'Revoked' : 'Active'}</span></td>
+          <td>${k.revoked ? '' : `<button class="btn btn-sm btn-danger" onclick="revokeKey('${k.id}')">Revoke</button>`}</td>
+        </tr>
+      `).join('');
+    }
+
+    async function createNewApiKey() {
+      if (!state.authenticated) return openAuthModal();
+      const name = document.getElementById('newKeyName').value.trim() || 'studio-key';
+      const rpm = parseInt(document.getElementById('newKeyRpm').value, 10) || 120;
+      const r = await fetch('/api/keys', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ name, rate_limit_rpm: rpm }),
+      });
+      if (r.ok) {
+        const d = await r.json();
+        document.getElementById('newlyMintedKeyBanner').style.display = 'block';
+        document.getElementById('newlyMintedKeyValue').value = d.key;
+        await refreshAllData();
+      }
+    }
+
+    async function revokeKey(kid) {
+      await fetch('/api/keys/' + kid, { method: 'DELETE', headers: authHeaders() });
+      await refreshAllData();
+    }
+
+    function copyTextValue(inputId) {
+      const el = document.getElementById(inputId);
+      navigator.clipboard.writeText(el.value);
+    }
+
+    function renderUsersTable() {
+      const tbody = document.getElementById('usersTableBody');
+      if (!tbody) return;
+      tbody.innerHTML = state.users.map(u => `
+        <tr>
+          <td style="font-weight:600;">${escapeHtml(u.email)}</td>
+          <td>${escapeHtml(u.name)}</td>
+          <td><span class="badge ${u.role === 'admin' ? 'badge-success' : ''}">${escapeHtml(u.role)}</span></td>
+          <td><span class="badge ${u.status === 'active' ? 'badge-success' : 'badge-danger'}">${escapeHtml(u.status)}</span></td>
+          <td class="mono">${u.rate_limit_rpm}</td>
+          <td class="mono">${u.active_keys || 0}</td>
+          <td class="mono">${u.total_requests || 0}</td>
+          <td>
+            ${u.email === '2024frank@gmail.com' ? '<span style="font-size:11.5px;color:var(--text-muted);">Primary Admin</span>' : `<button class="btn btn-sm btn-danger" onclick="removeUser('${escapeHtml(u.email)}')">Remove</button>`}
+          </td>
+        </tr>
+      `).join('');
+    }
+
+    async function inviteOrSaveUser() {
+      const email = document.getElementById('inviteEmail').value.trim();
+      const name = document.getElementById('inviteName').value.trim();
+      const role = document.getElementById('inviteRole').value;
+      const rate_limit_rpm = parseInt(document.getElementById('inviteRpm').value, 10) || 90;
+      const send_invite = document.getElementById('inviteSendEmail').checked;
+      if (!email) return;
+      const r = await fetch('/api/admin/users', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ email, name, role, rate_limit_rpm, send_invite }),
+      });
+      if (r.ok) {
+        document.getElementById('inviteEmail').value = '';
+        document.getElementById('inviteName').value = '';
+        await refreshAllData();
+      }
+    }
+
+    async function removeUser(email) {
+      await fetch('/api/admin/users/' + encodeURIComponent(email), { method: 'DELETE', headers: authHeaders() });
+      await refreshAllData();
+    }
+
+    function switchDocTab(tabId, btnEl) {
+      document.querySelectorAll('#view-docs .tab-btn').forEach(b => b.classList.remove('active'));
+      btnEl.classList.add('active');
+      document.querySelectorAll('.doc-pane').forEach(p => p.style.display = 'none');
+      document.getElementById('doc-tab-' + tabId).style.display = 'block';
+    }
+
+    initTheme();
+    (function applyQueryNavigation() {
+      const params = new URLSearchParams(window.location.search);
+      const themeParam = params.get('theme');
+      if (themeParam === 'light' || themeParam === 'dark') {
+        document.documentElement.setAttribute('data-theme', themeParam);
+      }
+      const viewParam = params.get('view');
+      if (viewParam) {
+        switchView(viewParam);
+      }
+      const docTab = params.get('doctab');
+      if (docTab) {
+        const btn = document.querySelector(`#view-docs .tab-btn[onclick*="'${docTab}'"]`);
+        if (btn) switchDocTab(docTab, btn);
+      }
+    })();
+    refreshAllData();
+  </script>
+</body>
+</html>
