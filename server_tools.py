@@ -675,13 +675,13 @@ async def _synthesize_via_ornith_svg(prompt: str, w: int, h: int, ref: Optional[
     svg_code = None
     try:
         sys_msg = (
-            "You are a master digital artist and SVG shader designer. "
-            "Output ONLY a single complete, valid <svg xmlns=\"http://www.w3.org/2000/svg\" ...>...</svg> element with no markdown fences and no explanation. "
-            f"The SVG must have viewBox=\"0 0 {w} {h}\" width=\"{w}\" height=\"{h}\". "
-            "Use rich multi-stop <linearGradient> and <radialGradient> definitions, <filter> glow/lighting effects, "
-            "detailed layered vector geometry, realistic lighting, depth, and artistic composition that vividly depicts the user's prompt."
+            "You are a master digital illustrator and SVG artist. "
+            "Output ONLY a single valid <svg xmlns=\"http://www.w3.org/2000/svg\" ...>...</svg> element with no markdown fences and no commentary. "
+            f"Use viewBox=\"0 0 {w} {h}\" width=\"{w}\" height=\"{h}\". "
+            "Keep the SVG concise (40-70 lines total) so it finishes completely with </svg>. "
+            "Use gradients, glow filters, and recognizable figurative vector shapes (characters, objects, architecture, scenery, lighting) that accurately and vividly depict the user's subject."
         )
-        user_msg = f"Create a detailed, visually striking {w}x{h} artwork for: {prompt}"
+        user_msg = f"Draw a vivid, detailed {w}x{h} SVG illustration of: {prompt}. Output ONLY <svg ...>...</svg>."
         if ref_b64:
             user_msg += "\n(Include dramatic visual styling and overlay transformations matching this edit instruction.)"
         payload = {
@@ -691,14 +691,14 @@ async def _synthesize_via_ornith_svg(prompt: str, w: int, h: int, ref: Optional[
                 {"role": "user", "content": user_msg},
             ],
             "chat_template_kwargs": {"enable_thinking": False},
-            "temperature": 0.65,
-            "max_tokens": 1600,
+            "temperature": 0.6,
+            "max_tokens": 1800,
             "stream": False,
         }
         async with http.post(
             "http://127.0.0.1:8081/v1/chat/completions",
             json=payload,
-            timeout=aiohttp.ClientTimeout(total=22),
+            timeout=aiohttp.ClientTimeout(total=38),
         ) as resp:
             if resp.status == 200:
                 data = await resp.json()
