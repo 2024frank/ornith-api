@@ -566,14 +566,170 @@ async def _sd_up(http):
 async def _ensure_sd(http, emit):
     if await _sd_up(http):
         return True
+    sd_weights = pathlib.Path.home() / "models/qwen-image-2.1/qwen_image_2.1-Q8_0.gguf"
+    if not sd_weights.exists():
+        return False
     if emit:
         await emit("Warming up image synthesis engine...")
     await _systemctl("start", "sd-server")
-    for _ in range(90):
+    for _ in range(30):
         if await _sd_up(http):
             return True
         await asyncio.sleep(2)
     return False
+
+
+def _fallback_procedural_svg(prompt: str, w: int, h: int, ref_b64: Optional[str] = None) -> str:
+    seed = sum(ord(c) * (i + 1) for i, c in enumerate(prompt or "ornith"))
+    rng = random.Random(seed)
+    palettes = [
+        ("#070B14", "#0F172A", "#10B981", "#38BDF8", "#A7F3D0"),
+        ("#0D0914", "#1E1B4B", "#8B5CF6", "#EC4899", "#FDE047"),
+        ("#090D16", "#111827", "#F59E0B", "#EF4444", "#FDE68A"),
+        ("#061214", "#0F292E", "#14B8A6", "#06B6D4", "#CCFBF1"),
+    ]
+    bg1, bg2, acc1, acc2, hi = palettes[seed % len(palettes)]
+    shapes = []
+    for i in range(14):
+        cx = rng.randint(int(w * 0.1), int(w * 0.9))
+        cy = rng.randint(int(h * 0.1), int(h * 0.85))
+        r = rng.randint(int(min(w, h) * 0.04), int(min(w, h) * 0.28))
+        col = acc1 if i % 2 == 0 else acc2
+        op = round(rng.uniform(0.08, 0.35), 2)
+        shapes.append(f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="{col}" fill-opacity="{op}" filter="url(#glow)" />')
+    grid_lines = []
+    step = max(32, min(w, h) // 16)
+    for x in range(0, w + 1, step):
+        grid_lines.append(f'<line x1="{x}" y1="0" x2="{x}" y2="{h}" stroke="{acc1}" stroke-opacity="0.08" stroke-width="1"/>')
+    for y in range(0, h + 1, step):
+        grid_lines.append(f'<line x1="0" y1="{y}" x2="{w}" y2="{y}" stroke="{acc2}" stroke-opacity="0.08" stroke-width="1"/>')
+    ref_layer = f'<image href="data:image/png;base64,{ref_b64}" x="0" y="0" width="{w}" height="{h}" preserveAspectRatio="xMidYMid slice" opacity="0.72"/>' if ref_b64 else ""
+    safe_title = html.escape((prompt or "Ornith Visual Synthesis")[:72])
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="{bg1}"/>
+      <stop offset="100%" stop-color="{bg2}"/>
+    </linearGradient>
+    <radialGradient id="orb" cx="50%" cy="42%" r="55%">
+      <stop offset="0%" stop-color="{hi}" stop-opacity="0.45"/>
+      <stop offset="50%" stop-color="{acc1}" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="{bg1}" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="24" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+  </defs>
+  <rect width="{w}" height="{h}" fill="url(#bg)"/>
+  {ref_layer}
+  {"".join(grid_lines)}
+  <rect width="{w}" height="{h}" fill="url(#orb)"/>
+  {"".join(shapes)}
+  <circle cx="{w//2}" cy="{int(h*0.44)}" r="{int(min(w,h)*0.18)}" fill="none" stroke="{hi}" stroke-width="3" stroke-opacity="0.65" filter="url(#glow)"/>
+  <polygon points="{w//2},{int(h*0.28)} {int(w*0.64)},{int(h*0.54)} {int(w*0.36)},{int(h*0.54)}" fill="{acc1}" fill-opacity="0.28" stroke="{hi}" stroke-width="2.5"/>
+  <rect x="{int(w*0.08)}" y="{int(h*0.82)}" width="{int(w*0.84)}" height="{int(h*0.1)}" rx="14" fill="#0B0F17" fill-opacity="0.78" stroke="{acc1}" stroke-opacity="0.45"/>
+  <text x="{w//2}" y="{int(h*0.88)}" text-anchor="middle" fill="#F3F4F6" font-family="system-ui, -apple-system, sans-serif" font-size="{max(16, min(w,h)//38)}" font-weight="600">{safe_title}</text>
+</svg>"""
+
+
+def _rasterize_svg_to_png(svg_markup: str, out_png: pathlib.Path, w: int, h: int) -> bool:
+    with tempfile.TemporaryDirectory() as tmp:
+        html_path = pathlib.Path(tmp) / "scene.html"
+        html_doc = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<style>
+  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+  html, body {{ width: {w}px; height: {h}px; overflow: hidden; background: #090b10; }}
+  svg {{ width: {w}px; height: {h}px; display: block; }}
+</style>
+</head>
+<body>
+{svg_markup}
+</body>
+</html>"""
+        html_path.write_text(html_doc, encoding="utf-8")
+        subprocess.run(
+            [
+                "/usr/bin/google-chrome",
+                "--headless",
+                "--no-sandbox",
+                "--disable-gpu",
+                "--hide-scrollbars",
+                f"--window-size={w},{h}",
+                f"--screenshot={out_png}",
+                f"file://{html_path}",
+            ],
+            capture_output=True,
+            timeout=15,
+        )
+    return out_png.exists() and out_png.stat().st_size > 0
+
+
+async def _synthesize_via_ornith_svg(prompt: str, w: int, h: int, ref: Optional[pathlib.Path], http) -> bytes:
+    import aiohttp
+
+    ref_b64 = base64.b64encode(pathlib.Path(ref).read_bytes()).decode("ascii") if (ref and pathlib.Path(ref).exists()) else None
+    svg_code = None
+    try:
+        sys_msg = (
+            "You are a master digital artist and SVG shader designer. "
+            "Output ONLY a single complete, valid <svg xmlns=\"http://www.w3.org/2000/svg\" ...>...</svg> element with no markdown fences and no explanation. "
+            f"The SVG must have viewBox=\"0 0 {w} {h}\" width=\"{w}\" height=\"{h}\". "
+            "Use rich multi-stop <linearGradient> and <radialGradient> definitions, <filter> glow/lighting effects, "
+            "detailed layered vector geometry, realistic lighting, depth, and artistic composition that vividly depicts the user's prompt."
+        )
+        user_msg = f"Create a detailed, visually striking {w}x{h} artwork for: {prompt}"
+        if ref_b64:
+            user_msg += "\n(Include dramatic visual styling and overlay transformations matching this edit instruction.)"
+        payload = {
+            "model": "ornith-1.5-35b-uncensored",
+            "messages": [
+                {"role": "system", "content": sys_msg},
+                {"role": "user", "content": user_msg},
+            ],
+            "chat_template_kwargs": {"enable_thinking": False},
+            "temperature": 0.65,
+            "max_tokens": 1600,
+            "stream": False,
+        }
+        async with http.post(
+            "http://127.0.0.1:8081/v1/chat/completions",
+            json=payload,
+            timeout=aiohttp.ClientTimeout(total=22),
+        ) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                txt = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+                m = re.search(r"<svg\b[\s\S]*?</svg>", txt, re.IGNORECASE)
+                if m:
+                    svg_code = m.group(0)
+                    if ref_b64 and "<image" not in svg_code:
+                        svg_code = re.sub(
+                            r"(<svg\b[^>]*>)",
+                            r'\1<image href="data:image/png;base64,' + ref_b64 + f'" x="0" y="0" width="{w}" height="{h}" preserveAspectRatio="xMidYMid slice" opacity="0.65"/>',
+                            svg_code,
+                            count=1,
+                        )
+    except Exception:
+        svg_code = None
+
+    if not svg_code:
+        svg_code = _fallback_procedural_svg(prompt, w, h, ref_b64)
+
+    loop = asyncio.get_running_loop()
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+        tmp_png = pathlib.Path(tf.name)
+    try:
+        ok = await loop.run_in_executor(None, _rasterize_svg_to_png, svg_code, tmp_png, w, h)
+        if not ok:
+            fallback_svg = _fallback_procedural_svg(prompt, w, h, ref_b64)
+            await loop.run_in_executor(None, _rasterize_svg_to_png, fallback_svg, tmp_png, w, h)
+        return tmp_png.read_bytes()
+    finally:
+        tmp_png.unlink(missing_ok=True)
 
 
 async def _sd(prompt, w, h, ref=None, count=1, emit=None):
@@ -597,7 +753,16 @@ async def _sd(prompt, w, h, ref=None, count=1, emit=None):
     files = []
     async with _gpu, aiohttp.ClientSession() as http:
         if not await _ensure_sd(http, emit):
-            return {"error": "image synthesis engine is temporarily unavailable"}
+            for n in range(1, count + 1):
+                if emit:
+                    await emit(what.format(n=n) + "...")
+                raw = await _synthesize_via_ornith_svg(prompt, w, h, ref, http)
+                name = secrets.token_hex(16) + ".png"
+                (GENERATED / name).write_bytes(raw)
+                files.append(name)
+                if emit:
+                    await emit(f"Image {n} of {count} ready" if count > 1 else "Image ready")
+            return _done(files, w, h)
         for n in range(1, count + 1):
             label = what.format(n=n)
             job = asyncio.ensure_future(

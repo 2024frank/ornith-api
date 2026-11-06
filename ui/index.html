@@ -2706,7 +2706,13 @@ ornith code`;
           headers: authHeaders(),
           body: JSON.stringify({ prompt, size, response_format: 'url' }),
         });
-        const d = await r.json();
+        const rawText = await r.text();
+        let d;
+        try {
+          d = JSON.parse(rawText);
+        } catch (parseErr) {
+          throw new Error(`HTTP ${r.status}: Server returned non-JSON response (${rawText.slice(0, 120)})`);
+        }
         pre.textContent = JSON.stringify(d, null, 2);
         await loadStorageFiles();
       } catch (e) {
