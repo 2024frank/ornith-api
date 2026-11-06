@@ -336,8 +336,8 @@ async def handle(req: web.Request) -> web.StreamResponse:
     ip = client_ip(req)
     loop = asyncio.get_running_loop()
 
-    # 1. Developer Console UI
-    if req.method == "GET" and path in ("/", "/index.html", "/console", "/docs", "/playground", "/sandbox"):
+    # 1. Developer Console UI & Public Docs (/docs, /cli)
+    if req.method == "GET" and path in ("/", "/index.html", "/console", "/docs", "/cli", "/playground", "/sandbox"):
         for ui_path in UI_CANDIDATES:
             if ui_path.exists():
                 return web.FileResponse(
@@ -393,7 +393,7 @@ echo ""
 echo "Next steps:"
 echo "  1. Ensure ~/.local/bin is active in your current terminal tab:"
 echo "     export PATH=\\"\$HOME/.local/bin:\$PATH\\""
-echo ""
+""".replace("\\$", "$") + """echo ""
 echo "  2. Authenticate your account (via 6-digit Resend code or API key):"
 echo "     ornith login"
 echo ""
@@ -919,6 +919,17 @@ echo "     ornith \\"Explain this repository\\""
             authdb.record_audit(user_email, "security", f"blocked_host_exfil:{path}", 403, ip=ip)
             return json_err(403, guardrail_block, "security_guardrail_error")
 
+        # Default to fast, visible token streaming (enable_thinking=False) unless caller explicitly opts into thinking.
+        # This prevents the 35B model from spending 40-60s on hidden reasoning_content before streaming code/answers.
+        explicit_think = body.pop("enable_thinking", None)
+        ct_kwargs = dict(body.get("chat_template_kwargs") or {})
+        if explicit_think is not None:
+            ct_kwargs["enable_thinking"] = bool(explicit_think)
+        elif "enable_thinking" not in ct_kwargs:
+            has_reasoning_opt = bool(body.get("reasoning_effort")) or bool(body.get("thinking"))
+            ct_kwargs["enable_thinking"] = has_reasoning_opt
+        body["chat_template_kwargs"] = ct_kwargs
+
         # 9a. Anthropic /v1/messages & /v1/messages/count_tokens (Claude Code CLI & Anthropic SDK)
         if path in ("/v1/messages", "/v1/messages/count_tokens"):
             # Ornith's Jinja chat template requires at most ONE system message at index 0.
@@ -978,6 +989,7 @@ echo "     ornith \\"Explain this repository\\""
                         },
                     )
                     await resp.prepare(req)
+                    await resp.write(b": stream-open\n\n")
                     async for chunk in up.content.iter_any():
                         await resp.write(chunk)
                     await resp.write_eof()
@@ -1024,6 +1036,7 @@ echo "     ornith \\"Explain this repository\\""
                         },
                     )
                     await resp.prepare(req)
+                    await resp.write(b": stream-open\n\n")
                     async for chunk in up.content.iter_any():
                         await resp.write(chunk)
                     await resp.write_eof()
@@ -1111,11 +1124,30 @@ echo "     ornith \\"Explain this repository\\""
             )
 
         enabled_tool_names = body.pop("enabled_tools", None)
-        server_tools_flag = body.pop("server_tools", True)
+        server_tools_flag = body.pop("server_tools", None)
+        last_user_text = ""
+        if isinstance(body.get("messages"), list) and body["messages"]:
+            last_mc = body["messages"][-1].get("content", "")
+            if isinstance(last_mc, str):
+                last_user_text = last_mc
+            elif isinstance(last_mc, list):
+                last_user_text = " ".join(p.get("text", "") for p in last_mc if isinstance(p, dict))
+        auto_tool_intent = bool(
+            re.search(
+                r"\b(generate an? image|create an? image|draw an? image|make an? image|edit (?:this |the )?image|search the web|web search|https?://[^\s]+)\b",
+                last_user_text,
+                re.IGNORECASE,
+            )
+        )
+        should_use_server_tools = (
+            server_tools_flag is True
+            or (isinstance(enabled_tool_names, list) and len(enabled_tool_names) > 0)
+            or (server_tools_flag is None and auto_tool_intent)
+        )
         if (
             path == "/v1/chat/completions"
             and not body.get("tools")
-            and server_tools_flag is not False
+            and should_use_server_tools
             and cred["allow_tools"]
         ):
             return await run_agent_with_server_tools(
@@ -1148,6 +1180,7 @@ echo "     ornith \\"Explain this repository\\""
                     },
                 )
                 await resp.prepare(req)
+                await resp.write(b": stream-open\n\n")
                 col = chatdb.StreamCollector()
                 async for chunk in up.content.iter_any():
                     col.feed(chunk)
@@ -1218,6 +1251,8 @@ async def run_agent_with_server_tools(
         headers={"Content-Type": "text/event-stream" if stream else "application/json", **hdrs},
     )
     await resp.prepare(req)
+    if stream:
+        await resp.write(b": stream-open\n\n")
 
     async def sse(delta, finish=None, usage=None, tool_trace=None):
         ev: Dict[str, Any] = {

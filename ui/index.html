@@ -1169,14 +1169,16 @@
         </div>
 
         <div class="nav-group">
-          <div class="nav-group-label">Resources</div>
+          <div class="nav-group-label">Resources (Public)</div>
           <button class="nav-btn" data-view="cli" onclick="switchView('cli')">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-            CLI &amp; Coding Agent
+            <span style="flex:1;">CLI &amp; Coding Agent</span>
+            <span class="badge badge-success" style="font-size:11px;padding:1px 6px;">Public</span>
           </button>
           <button class="nav-btn" data-view="docs" onclick="switchView('docs')">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
-            Documentation
+            <span style="flex:1;">Documentation</span>
+            <span class="badge badge-success" style="font-size:11px;padding:1px 6px;">Public</span>
           </button>
         </div>
       </div>
@@ -1208,6 +1210,10 @@
           <span class="model-badge mono">ornith-1.5-35b-uncensored · 128K ctx</span>
         </div>
         <div class="topbar-actions">
+          <button class="btn btn-sm" onclick="switchView('docs')">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+            Public Docs
+          </button>
           <button class="btn btn-sm" onclick="switchView('cli')">
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
             Install CLI
@@ -1303,10 +1309,10 @@
                       <input type="file" id="mediaUploadInput" accept="image/*,video/*" style="display:none;" onchange="handleMediaAttach(event)" />
                       + Media
                     </label>
-                    <button type="button" class="chip-toggle active" id="toggleThink" onclick="toggleChip(this)">Thinking</button>
-                    <button type="button" class="chip-toggle active" data-tool="web_search" onclick="toggleChip(this)">Web Search</button>
-                    <button type="button" class="chip-toggle active" data-tool="run_sandbox_code" onclick="toggleChip(this)">Code Interpreter</button>
-                    <button type="button" class="chip-toggle active" data-tool="generate_image" onclick="toggleChip(this)">Image Gen</button>
+                    <button type="button" class="chip-toggle" id="toggleThink" onclick="toggleChip(this)" title="Enable deep step-by-step chain-of-thought reasoning">Thinking</button>
+                    <button type="button" class="chip-toggle" data-tool="web_search" onclick="toggleChip(this)">Web Search</button>
+                    <button type="button" class="chip-toggle" data-tool="run_sandbox_code" onclick="toggleChip(this)">Code Interpreter</button>
+                    <button type="button" class="chip-toggle" data-tool="generate_image" onclick="toggleChip(this)">Image Gen</button>
                     <button type="button" class="chip-toggle" onclick="openCustomFnModal()">+ Function JSON</button>
                   </div>
                   <div style="display:flex;align-items:center;gap:8px;">
@@ -2872,7 +2878,8 @@ ornith code`;
       if (themeParam === 'light' || themeParam === 'dark') {
         document.documentElement.setAttribute('data-theme', themeParam);
       }
-      const viewParam = params.get('view');
+      const pathName = window.location.pathname.replace(/\/+$/, '');
+      const viewParam = params.get('view') || (pathName === '/docs' ? 'docs' : pathName === '/cli' ? 'cli' : pathName === '/sandbox' ? 'sandbox' : '');
       if (viewParam) {
         switchView(viewParam);
       }
