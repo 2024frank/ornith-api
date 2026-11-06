@@ -676,10 +676,10 @@ async def _synthesize_via_ornith_svg(prompt: str, w: int, h: int, ref: Optional[
     try:
         sys_msg = (
             "You are a master digital illustrator and SVG artist. "
-            "Output ONLY a single valid <svg xmlns=\"http://www.w3.org/2000/svg\" ...>...</svg> element with no markdown fences and no commentary. "
+            "Output ONLY a single valid <svg xmlns=\"http://www.w3.org/2000/svg\" ...>...</svg> element with no markdown fences, no XML comments, and no explanation. "
             f"Use viewBox=\"0 0 {w} {h}\" width=\"{w}\" height=\"{h}\". "
-            "Keep the SVG concise (40-70 lines total) so it finishes completely with </svg>. "
-            "Use gradients, glow filters, and recognizable figurative vector shapes (characters, objects, architecture, scenery, lighting) that accurately and vividly depict the user's subject."
+            "Be concise (25-40 SVG elements max, zero comments) so the SVG always closes with </svg>. "
+            "Use gradients and recognizable figurative vector shapes (characters, eyes, wings, objects, architecture, scenery, lighting) that vividly depict the user's subject."
         )
         user_msg = f"Draw a vivid, detailed {w}x{h} SVG illustration of: {prompt}. Output ONLY <svg ...>...</svg>."
         if ref_b64:
@@ -691,8 +691,8 @@ async def _synthesize_via_ornith_svg(prompt: str, w: int, h: int, ref: Optional[
                 {"role": "user", "content": user_msg},
             ],
             "chat_template_kwargs": {"enable_thinking": False},
-            "temperature": 0.6,
-            "max_tokens": 1800,
+            "temperature": 0.55,
+            "max_tokens": 1100,
             "stream": False,
         }
         async with http.post(
@@ -706,13 +706,20 @@ async def _synthesize_via_ornith_svg(prompt: str, w: int, h: int, ref: Optional[
                 m = re.search(r"<svg\b[\s\S]*?</svg>", txt, re.IGNORECASE)
                 if m:
                     svg_code = m.group(0)
-                    if ref_b64 and "<image" not in svg_code:
-                        svg_code = re.sub(
-                            r"(<svg\b[^>]*>)",
-                            r'\1<image href="data:image/png;base64,' + ref_b64 + f'" x="0" y="0" width="{w}" height="{h}" preserveAspectRatio="xMidYMid slice" opacity="0.65"/>',
-                            svg_code,
-                            count=1,
-                        )
+                else:
+                    idx = txt.lower().find("<svg")
+                    if idx != -1:
+                        partial = txt[idx:]
+                        last_gt = partial.rfind(">")
+                        if last_gt != -1:
+                            svg_code = partial[: last_gt + 1] + "</g></svg>"
+                if svg_code and ref_b64 and "<image" not in svg_code:
+                    svg_code = re.sub(
+                        r"(<svg\b[^>]*>)",
+                        r'\1<image href="data:image/png;base64,' + ref_b64 + f'" x="0" y="0" width="{w}" height="{h}" preserveAspectRatio="xMidYMid slice" opacity="0.65"/>',
+                        svg_code,
+                        count=1,
+                    )
     except Exception:
         svg_code = None
 
