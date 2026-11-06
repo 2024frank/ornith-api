@@ -348,9 +348,7 @@ async def handle(req: web.Request) -> web.StreamResponse:
 
     # 1b. CLI Installer & Download Endpoints (/install.sh & /cli/ornith.py)
     if req.method == "GET" and path == "/cli/ornith.py":
-        cli_path = WORKSPACE_DIR / "ornith_sdk.py"
-        if not cli_path.exists():
-            cli_path = HERE / "ornith_sdk.py"
+        cli_path = HERE / "ornith_sdk.py"
         if cli_path.exists():
             return web.FileResponse(
                 cli_path,
@@ -359,9 +357,11 @@ async def handle(req: web.Request) -> web.StreamResponse:
         return json_err(404, "CLI script not found.")
 
     if req.method == "GET" and path == "/install.sh":
-        host_hdr = req.headers.get("Host", "127.0.0.1:8099")
-        proto = "https" if "vercel.app" in host_hdr or "trycloudflare.com" in host_hdr else "http"
-        origin = f"{proto}://{host_hdr}"
+        host_hdr = req.headers.get("Host", "")
+        if host_hdr.startswith("127.0.0.1") or host_hdr.startswith("localhost"):
+            origin = f"http://{host_hdr}"
+        else:
+            origin = "https://kusi-qwen-api.vercel.app"
         install_script = f"""#!/usr/bin/env bash
 set -euo pipefail
 
@@ -369,22 +369,35 @@ echo "Installing Ornith-1.5-35B-Uncensored CLI & Coding Agent Suite..."
 mkdir -p "$HOME/.local/bin" "$HOME/.config/ornith"
 chmod 700 "$HOME/.config/ornith"
 
+rm -f "$HOME/.local/bin/ornith" "$HOME/.local/bin/onith"
 curl -fsSL "{origin}/cli/ornith.py" -o "$HOME/.local/bin/ornith"
 chmod +x "$HOME/.local/bin/ornith"
+ln -sf "$HOME/.local/bin/ornith" "$HOME/.local/bin/onith"
 
-if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
-  echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
-  export PATH="$HOME/.local/bin:$PATH"
+# Also link into any user-writable bin directory already on PATH (e.g. ~/.local/node/bin)
+if [ -d "$HOME/.local/node/bin" ] && [ -w "$HOME/.local/node/bin" ]; then
+  ln -sf "$HOME/.local/bin/ornith" "$HOME/.local/node/bin/ornith"
+  ln -sf "$HOME/.local/bin/ornith" "$HOME/.local/node/bin/onith"
 fi
+
+for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+  if [ -f "$rc" ] && ! grep -q '\\.local/bin' "$rc"; then
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$rc"
+  fi
+done
+export PATH="$HOME/.local/bin:$PATH"
 
 echo ""
 echo "✅ Ornith CLI installed to ~/.local/bin/ornith"
 echo ""
 echo "Next steps:"
-echo "  1. Authenticate your account (via 6-digit Resend code or API key):"
+echo "  1. If using an existing terminal, refresh PATH (or run directly):"
+echo "     hash -r 2>/dev/null || true"
+echo ""
+echo "  2. Authenticate your account (via 6-digit Resend code or API key):"
 echo "     ornith login"
 echo ""
-echo "  2. Start interactive coding agent or run a prompt:"
+echo "  3. Start interactive coding agent or run a prompt:"
 echo "     ornith code"
 echo "     ornith \\"Explain this repository\\""
 """
