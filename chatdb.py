@@ -1,4 +1,4 @@
-"""Chat history for the Qwen API: every chat through the gateway is saved here, on this PC only.
+"""Chat history for the Ornith API: every chat through the gateway is saved here, on this PC only.
 
   data/chats.db        SQLite: chats, feedback
   data/images/<sha>.*  images people sent (stored once, referenced from the chats as cj-image:<sha>)
@@ -40,10 +40,14 @@ def connect():
 def _store_images(messages):
     """Replace base64 data-URL images with cj-image:<sha> and save the bytes once. Returns the count."""
     n = 0
-    for m in messages or []:
-        if not isinstance(m.get("content"), list):
+    if not isinstance(messages, list):
+        return 0
+    for m in messages:
+        if not isinstance(m, dict) or not isinstance(m.get("content"), list):
             continue
         for part in m["content"]:
+            if not isinstance(part, dict):
+                continue
             url = (part.get("image_url") or {}).get("url", "") if part.get("type") == "image_url" else ""
             mt = re.match(r"data:(image/[\w.+-]+);base64,", url)
             if not mt:
@@ -62,8 +66,12 @@ def _store_images(messages):
 def conversation_of(key_name, body, header):
     if header:
         return f"{key_name}:{header[:80]}"
-    first = next((m for m in body.get("messages", []) if m.get("role") == "user"), None)
-    seed = json.dumps(first.get("content") if first else body.get("prompt", ""), sort_keys=True)[:4000]
+    msgs = body.get("messages") if isinstance(body, dict) else None
+    first = next(
+        (m for m in (msgs if isinstance(msgs, list) else []) if isinstance(m, dict) and m.get("role") == "user"),
+        None,
+    )
+    seed = json.dumps(first.get("content") if first else (body.get("prompt", "") if isinstance(body, dict) else ""), sort_keys=True)[:4000]
     return f"{key_name}:" + hashlib.sha1(seed.encode()).hexdigest()[:16]
 
 
@@ -95,20 +103,44 @@ class StreamCollector:
     """Rebuilds the reply from server-sent-event chunks while they are forwarded."""
 
     def __init__(self):
-        self.buf, self.answer, self.reasoning, self.tools, self.usage = "", [], [], {}, {}
+        self.buf = ""
+        self.answer = []
+        self.reasoning = []
+        self.tools = {}
+        self.usage = {}
+        self.finish_reason = None
+        self.saw_done = False
+        self.cmpl_id = None
+        self.created = None
+        self.model = None
+        self.system_fingerprint = None
 
     def feed(self, chunk):
         self.buf += chunk.decode("utf-8", "replace")
         *lines, self.buf = self.buf.split("\n")
         for line in lines:
-            if not line.startswith("data:") or line.strip() == "data: [DONE]":
+            s = line.strip()
+            if not s.startswith("data:"):
+                continue
+            if s == "data: [DONE]":
+                self.saw_done = True
                 continue
             try:
-                ev = json.loads(line[5:])
+                ev = json.loads(s[5:])
             except Exception:
                 continue
+            if ev.get("id"):
+                self.cmpl_id = ev["id"]
+            if ev.get("created"):
+                self.created = ev["created"]
+            if ev.get("model"):
+                self.model = ev["model"]
+            if ev.get("system_fingerprint"):
+                self.system_fingerprint = ev["system_fingerprint"]
             self.usage = ev.get("usage") or self.usage
             for ch in ev.get("choices") or []:
+                if ch.get("finish_reason"):
+                    self.finish_reason = ch["finish_reason"]
                 d = ch.get("delta") or {}
                 if d.get("content"):
                     self.answer.append(d["content"])
@@ -117,14 +149,51 @@ class StreamCollector:
                 if d.get("reasoning_content"):
                     self.reasoning.append(d["reasoning_content"])
                 for tc in d.get("tool_calls") or []:
-                    t = self.tools.setdefault(tc.get("index", 0), {"id": tc.get("id"), "type": "function",
-                                                                   "function": {"name": "", "arguments": ""}})
+                    t = self.tools.setdefault(
+                        tc.get("index", 0),
+                        {
+                            "id": tc.get("id") or f"call_{tc.get('index', 0)}",
+                            "type": "function",
+                            "function": {"name": "", "arguments": ""},
+                        },
+                    )
+                    if tc.get("id"):
+                        t["id"] = tc["id"]
                     f = tc.get("function") or {}
                     t["function"]["name"] += f.get("name") or ""
                     t["function"]["arguments"] += f.get("arguments") or ""
 
     def result(self):
         return "".join(self.answer), "".join(self.reasoning) or None, list(self.tools.values()) or None, self.usage
+
+    def build_chat_completion(self, default_id: str, default_model: str) -> dict:
+        text, think, calls, usage = self.result()
+        fin = self.finish_reason or ("tool_calls" if calls else "stop")
+        msg = {
+            "role": "assistant",
+            "content": text if (text or not calls) else None,
+        }
+        if think:
+            msg["reasoning_content"] = think
+        if calls:
+            msg["tool_calls"] = calls
+        out = {
+            "id": self.cmpl_id or default_id,
+            "object": "chat.completion",
+            "created": self.created or int(time.time()),
+            "model": self.model or default_model,
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": fin,
+                    "message": msg,
+                }
+            ],
+            "usage": usage or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        }
+        if self.system_fingerprint:
+            out["system_fingerprint"] = self.system_fingerprint
+        return out
 
 
 def list_chats(key_name, limit=50, before=None):

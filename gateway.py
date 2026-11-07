@@ -22,7 +22,6 @@ import json
 import os
 import pathlib
 import re
-import subprocess
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
@@ -43,8 +42,31 @@ LOG = HERE / "access.log"
 PUBLIC_URL_FILE = HERE / "public-url.txt"
 UPSTREAM = "http://127.0.0.1:8081"
 PRIMARY_MODEL = "ornith-1.5-35b-uncensored"
-ALLOWED_EXPLICIT_PRESETS = {"ornith-1.5-35b-uncensored", "ornith-1.5-35b", "ornith-calendar"}
+ALLOWED_EXPLICIT_PRESETS = {
+    "ornith-1.5-35b-uncensored",
+    "ornith-1.5-35b",
+    "ornith-calendar",
+    "ornith-1.5-35b-agent",
+}
+VALID_ROLES = {"system", "developer", "user", "assistant", "tool", "function"}
+POST_ONLY_V1_PATHS = {
+    "/v1/chat/completions",
+    "/v1/completions",
+    "/v1/messages",
+    "/v1/messages/count_tokens",
+    "/v1/responses",
+    "/v1/images/generations",
+    "/v1/images/edits",
+    "/v1/feedback",
+}
+GET_ONLY_V1_PATHS = {
+    "/v1/models",
+    "/v1/chats",
+}
 MAX_BODY = 35 * 1024 * 1024  # 35 MB for multimodal images & video clips
+
+# Reserve 1 of the 2 GPU slots for interactive/short requests so a long generation never starves short requests.
+_LONG_REQ_SEM = asyncio.Semaphore(1)
 
 MODEL_SPEC = {
     "id": PRIMARY_MODEL,
@@ -62,15 +84,299 @@ MODEL_SPEC = {
     "gateway_public": "https://kusi-qwen-api.vercel.app",
 }
 
+MODEL_IDENTITY_NOTES = {
+    "ornith-1.5-35b-uncensored": "You are Ornith-1.5-35B-Uncensored by Ornith AI.",
+    "ornith-1.5-35b": "You are Ornith-1.5-35B by Ornith AI.",
+    "ornith-calendar": (
+        "You are Ornith-Calendar (ornith-calendar) by Ornith AI, a specialized model fine-tuned for "
+        "calendar scheduling, event extraction, and concise time-management assistance."
+    ),
+    "ornith-1.5-35b-agent": "You are Ornith-1.5-35B-Agent by Ornith AI with sandbox and tool execution.",
+}
 
-def resolve_target_model(requested: Optional[str]) -> str:
-    """Always route to ornith-1.5-35b-uncensored unless an explicit local preset is requested."""
-    if not requested:
-        return PRIMARY_MODEL
-    s = str(requested).strip()
-    if s in ALLOWED_EXPLICIT_PRESETS:
-        return s
-    return PRIMARY_MODEL
+MODEL_CATALOG = [
+    {
+        "id": "ornith-1.5-35b-uncensored",
+        "object": "model",
+        "created": 1740000000,
+        "owned_by": "ornith-ai",
+        "status": "loaded",
+        "context_window": 131072,
+        "modalities": ["text", "image", "video"],
+        "description": "Primary uncensored 35.5B multimodal model (Q8_0 + BF16 vision/video projector, 131K context).",
+        "spec": MODEL_SPEC,
+    },
+    {
+        "id": "ornith-calendar",
+        "object": "model",
+        "created": 1740000100,
+        "owned_by": "ornith-ai",
+        "status": "loaded",
+        "context_window": 131072,
+        "modalities": ["text"],
+        "description": "Ornith 35.5B fine-tuned with AI Calendar LoRA and control-vector steering for scheduling and event extraction.",
+    },
+    {
+        "id": "ornith-1.5-35b",
+        "object": "model",
+        "created": 1740000200,
+        "owned_by": "ornith-ai",
+        "status": "loaded",
+        "context_window": 131072,
+        "modalities": ["text", "image", "video"],
+        "description": "Standard Ornith-1.5-35B multimodal model.",
+    },
+    {
+        "id": "ornith-1.5-35b-agent",
+        "object": "model",
+        "created": 1740000300,
+        "owned_by": "ornith-ai",
+        "status": "loaded",
+        "context_window": 131072,
+        "modalities": ["text", "image", "video"],
+        "description": "Opt-in autonomous agent preset with server-side Python/Bash sandbox, web search, and image synthesis tools.",
+    },
+]
+
+
+def resolve_and_validate_model(requested: Any) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Validate requested model name.
+    Returns (client_model_name, upstream_preset_name, error_message).
+    - Omitted or empty `model` defaults to PRIMARY_MODEL.
+    - Unknown `model` returns (None, None, error_message) so caller returns 404 model_not_found.
+    - `ornith-1.5-35b` and `ornith-1.5-35b-agent` route to the resident `ornith-1.5-35b-uncensored` VRAM slot
+      so llama-server never evicts `ornith-1.5-35b-uncensored` or `ornith-calendar` from VRAM.
+    """
+    if requested is None or (isinstance(requested, str) and not requested.strip()):
+        return PRIMARY_MODEL, PRIMARY_MODEL, None
+    if not isinstance(requested, str):
+        return None, None, "Invalid 'model' parameter: must be a string."
+    s = requested.strip()
+    if s not in ALLOWED_EXPLICIT_PRESETS:
+        return None, None, f"The model '{s}' does not exist or you do not have access to it."
+    upstream_model = "ornith-calendar" if s == "ornith-calendar" else PRIMARY_MODEL
+    return s, upstream_model, None
+
+
+def is_long_request(body: Dict[str, Any], server_tools_enabled: bool = False) -> bool:
+    """Classify whether a request is expected to run long so we reserve 1 of the 2 GPU slots for fast requests."""
+    if server_tools_enabled:
+        return True
+    max_tok = body.get("max_tokens") or body.get("max_completion_tokens")
+    if isinstance(max_tok, int) and not isinstance(max_tok, bool):
+        if max_tok <= 300:
+            return False
+        if max_tok > 500:
+            return True
+    # Inspect prompt length and keywords when max_tokens is omitted or moderate
+    texts: List[str] = []
+    msgs = body.get("messages")
+    if isinstance(msgs, list):
+        for m in msgs:
+            if isinstance(m, dict):
+                c = m.get("content")
+                if isinstance(c, str):
+                    texts.append(c)
+    elif isinstance(body.get("prompt"), str):
+        texts.append(body["prompt"])
+    combined = " ".join(texts)
+    if len(combined) > 1200:
+        return True
+    if re.search(r"\b(essay|article|comprehensive|detailed|1,?000|1,?500|2,?000|words|chapter|story|tutorial)\b", combined, re.IGNORECASE):
+        return True
+    return False
+
+
+def validate_chat_or_completion_input(path: str, body: Any) -> Optional[Tuple[int, str, str, Optional[str], Optional[str]]]:
+    """Validate OpenAI / Anthropic request payload before forwarding to upstream.
+    Returns (http_status, message, err_type, param, code) on error, or None if valid.
+    """
+    if not isinstance(body, dict):
+        return (400, "Request body must be a JSON object.", "invalid_request_error", None, "invalid_json")
+
+    # 1. Validate messages for chat endpoints
+    if path in ("/v1/chat/completions", "/v1/messages", "/v1/messages/count_tokens"):
+        msgs = body.get("messages")
+        if not isinstance(msgs, list) or len(msgs) == 0:
+            return (
+                400,
+                "'messages' must be a non-empty array of message objects.",
+                "invalid_request_error",
+                "messages",
+                "invalid_messages",
+            )
+        for idx, m in enumerate(msgs):
+            if not isinstance(m, dict):
+                return (
+                    400,
+                    f"messages[{idx}] must be an object with 'role' and 'content'.",
+                    "invalid_request_error",
+                    f"messages[{idx}]",
+                    "invalid_message_format",
+                )
+            role = m.get("role")
+            if not isinstance(role, str) or role not in VALID_ROLES:
+                return (
+                    400,
+                    f"Invalid role '{role}' at messages[{idx}]. Must be one of: {', '.join(sorted(VALID_ROLES))}.",
+                    "invalid_request_error",
+                    f"messages[{idx}].role",
+                    "invalid_role",
+                )
+            content = m.get("content")
+            has_tool_calls = bool(m.get("tool_calls") or m.get("function_call"))
+            if content is None and not has_tool_calls and role != "assistant":
+                return (
+                    400,
+                    f"messages[{idx}].content is required for role '{role}'.",
+                    "invalid_request_error",
+                    f"messages[{idx}].content",
+                    "missing_content",
+                )
+            if content is not None and not isinstance(content, (str, list)):
+                return (
+                    400,
+                    f"messages[{idx}].content must be a string or array of content parts.",
+                    "invalid_request_error",
+                    f"messages[{idx}].content",
+                    "invalid_content_type",
+                )
+
+    if path == "/v1/completions":
+        prompt = body.get("prompt")
+        if prompt is None or not isinstance(prompt, (str, list)) or (isinstance(prompt, str) and not prompt):
+            return (
+                400,
+                "'prompt' must be a non-empty string or array.",
+                "invalid_request_error",
+                "prompt",
+                "invalid_prompt",
+            )
+
+    # 2. Validate max_tokens / max_completion_tokens
+    for tok_key in ("max_tokens", "max_completion_tokens"):
+        if tok_key in body and body[tok_key] is not None:
+            val = body[tok_key]
+            if isinstance(val, bool) or not isinstance(val, int) or val < 1:
+                return (
+                    400,
+                    f"'{tok_key}' must be an integer >= 1 (got {val!r}).",
+                    "invalid_request_error",
+                    tok_key,
+                    "invalid_max_tokens",
+                )
+            if val > 131072:
+                return (
+                    400,
+                    f"'{tok_key}' ({val}) exceeds the maximum context window (131072).",
+                    "invalid_request_error",
+                    tok_key,
+                    "context_length_exceeded",
+                )
+
+    # 3. Validate temperature (0 to 2)
+    if "temperature" in body and body["temperature"] is not None:
+        temp = body["temperature"]
+        if isinstance(temp, bool) or not isinstance(temp, (int, float)) or temp < 0.0 or temp > 2.0:
+            return (
+                400,
+                f"'temperature' must be a number between 0 and 2 (got {temp!r}).",
+                "invalid_request_error",
+                "temperature",
+                "invalid_temperature",
+            )
+
+    # 4. Validate top_p (0 to 1)
+    if "top_p" in body and body["top_p"] is not None:
+        top_p = body["top_p"]
+        if isinstance(top_p, bool) or not isinstance(top_p, (int, float)) or top_p < 0.0 or top_p > 1.0:
+            return (
+                400,
+                f"'top_p' must be a number between 0 and 1 (got {top_p!r}).",
+                "invalid_request_error",
+                "top_p",
+                "invalid_top_p",
+            )
+
+    # 5. Validate n (1 to 8)
+    if "n" in body and body["n"] is not None:
+        n_val = body["n"]
+        if isinstance(n_val, bool) or not isinstance(n_val, int) or n_val < 1 or n_val > 8:
+            return (
+                400,
+                f"'n' must be an integer between 1 and 8 (got {n_val!r}).",
+                "invalid_request_error",
+                "n",
+                "invalid_n",
+            )
+
+    # 6. Validate response_format
+    if "response_format" in body and body["response_format"] is not None:
+        rf = body["response_format"]
+        if not isinstance(rf, dict) or rf.get("type") not in ("text", "json_object", "json_schema"):
+            return (
+                400,
+                "'response_format' must be an object with 'type' set to 'text', 'json_object', or 'json_schema'.",
+                "invalid_request_error",
+                "response_format",
+                "invalid_response_format",
+            )
+        if rf.get("type") == "json_schema":
+            js = rf.get("json_schema")
+            if not isinstance(js, dict) or not isinstance(js.get("schema"), dict):
+                return (
+                    400,
+                    "response_format of type 'json_schema' requires a 'json_schema.schema' object.",
+                    "invalid_request_error",
+                    "response_format.json_schema",
+                    "invalid_json_schema",
+                )
+
+    return None
+
+
+def parse_upstream_error(status: int, raw_bytes: bytes) -> Tuple[int, Dict[str, Any]]:
+    """Map upstream llama-server error payload into a clean OpenAI-style error dict and proper HTTP status."""
+    mapped_status = status if 400 <= status < 600 else 500
+    msg = "Upstream model server error."
+    err_type = "invalid_request_error" if 400 <= mapped_status < 500 else "server_error"
+    code: Optional[str] = None
+    param: Optional[str] = None
+
+    try:
+        parsed = json.loads(raw_bytes.decode("utf-8", "replace"))
+        if isinstance(parsed, dict):
+            err_obj = parsed.get("error") if isinstance(parsed.get("error"), dict) else parsed
+            if isinstance(err_obj.get("message"), str) and err_obj["message"].strip():
+                msg = err_obj["message"].strip()
+            if isinstance(err_obj.get("type"), str) and err_obj["type"].strip():
+                err_type = err_obj["type"].strip()
+            if "exceed" in msg.lower() and "context" in msg.lower():
+                mapped_status = 400
+                err_type = "invalid_request_error"
+                code = "context_length_exceeded"
+                param = "messages"
+            elif "grammar" in msg.lower() or "json" in msg.lower():
+                mapped_status = 400
+                err_type = "invalid_request_error"
+                code = "invalid_response_format"
+            elif "chat template" in msg.lower() or "system message" in msg.lower():
+                mapped_status = 400
+                err_type = "invalid_request_error"
+                code = "invalid_messages"
+    except Exception:
+        txt = raw_bytes.decode("utf-8", "replace").strip()
+        if txt and not txt.startswith("<"):
+            msg = txt[:400]
+
+    return mapped_status, {
+        "error": {
+            "message": msg,
+            "type": err_type,
+            "param": param,
+            "code": code,
+        }
+    }
 
 
 def log_access(**kw) -> None:
@@ -90,20 +396,40 @@ def client_ip(req: web.Request) -> str:
     )
 
 
-def cors_headers() -> Dict[str, str]:
-    return {
+def cors_headers(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    base = {
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
         "Access-Control-Allow-Headers": "Authorization, Content-Type, X-API-Key, Anthropic-Version, Anthropic-Beta, X-Conversation-Id",
-        "Access-Control-Expose-Headers": "X-Chat-Id, X-Ornith-Model",
+        "Access-Control-Expose-Headers": (
+            "X-Chat-Id, X-Ornith-Model, Retry-After, Allow, "
+            "X-RateLimit-Limit-Requests, X-RateLimit-Remaining-Requests, X-RateLimit-Reset-Requests"
+        ),
     }
+    if extra:
+        base.update(extra)
+    return base
 
 
-def json_err(status: int, msg: str, err_type: str = "invalid_request_error") -> web.Response:
+def json_err(
+    status: int,
+    msg: str,
+    err_type: str = "invalid_request_error",
+    param: Optional[str] = None,
+    code: Optional[str] = None,
+    extra_headers: Optional[Dict[str, str]] = None,
+) -> web.Response:
     return web.json_response(
-        {"error": {"message": msg, "type": err_type}},
+        {
+            "error": {
+                "message": msg,
+                "type": err_type,
+                "param": param,
+                "code": code,
+            }
+        },
         status=status,
-        headers=cors_headers(),
+        headers=cors_headers(extra_headers),
     )
 
 
@@ -200,7 +526,6 @@ async def always_on_watchdog(app: web.Application) -> None:
                 )
                 await proc.wait()
             elif hw["model_status"] != "loaded":
-                # Trigger a 1-token warm request so ornith-1.5-35b-uncensored stays resident in VRAM
                 async with app["session"].post(
                     f"{UPSTREAM}/v1/chat/completions",
                     json={
@@ -267,10 +592,11 @@ def _check_inference_host_guardrail(body: Dict[str, Any]) -> Optional[str]:
         )
     return None
 
-def _normalize_responses_payload(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Tuple[str, str]], bool]:
+
+def _normalize_responses_payload(payload: Dict[str, Any], upstream_model: str) -> Tuple[Dict[str, Any], Dict[str, Tuple[str, str]], bool]:
     ns_map: Dict[str, Tuple[str, str]] = {}
     custom_apply_patch = False
-    payload["model"] = resolve_target_model(payload.get("model"))
+    payload["model"] = upstream_model
 
     if "tools" in payload and isinstance(payload["tools"], list):
         flat_tools = []
@@ -306,7 +632,6 @@ def _normalize_responses_payload(payload: Dict[str, Any]) -> Tuple[Dict[str, Any
                 )
         payload["tools"] = flat_tools
 
-    # Fold mid-conversation system/developer messages into instructions for Ornith's chat template
     if isinstance(payload.get("input"), list):
         sys_texts, kept = [], []
         for item in payload["input"]:
@@ -329,6 +654,16 @@ def _normalize_responses_payload(payload: Dict[str, Any]) -> Tuple[Dict[str, Any
 # ── Main HTTP Handler ────────────────────────────────────────────────────
 
 async def handle(req: web.Request) -> web.StreamResponse:
+    try:
+        return await _handle_inner(req)
+    except web.HTTPException as http_ex:
+        return json_err(http_ex.status, http_ex.reason or "HTTP error.", "invalid_request_error")
+    except Exception as exc:
+        log_access(path=req.path, status=500, error=str(exc)[:200])
+        return json_err(500, "Internal gateway error while processing request.", "server_error", code="internal_error")
+
+
+async def _handle_inner(req: web.Request) -> web.StreamResponse:
     if req.method == "OPTIONS":
         return web.Response(status=204, headers=cors_headers())
 
@@ -374,7 +709,6 @@ curl -fsSL "{origin}/cli/ornith.py" -o "$HOME/.local/bin/ornith"
 chmod +x "$HOME/.local/bin/ornith"
 ln -sf "$HOME/.local/bin/ornith" "$HOME/.local/bin/onith"
 
-# Also link into any user-writable bin directory already on PATH (e.g. ~/.local/node/bin)
 if [ -d "$HOME/.local/node/bin" ] && [ -w "$HOME/.local/node/bin" ]; then
   ln -sf "$HOME/.local/bin/ornith" "$HOME/.local/node/bin/ornith"
   ln -sf "$HOME/.local/bin/ornith" "$HOME/.local/node/bin/onith"
@@ -420,15 +754,18 @@ echo "     ornith \\"Explain this repository\\""
     # 3. Health & Hardware status
     if req.method == "GET" and path in ("/health", "/api/hardware"):
         hw = await query_hardware_state(req.app["session"])
+        is_ready = hw["online"] and hw["model_status"] == "loaded"
         return web.json_response(
             {
-                "ok": hw["online"] and hw["model_status"] == "loaded",
+                "ok": is_ready,
+                "status": "healthy" if is_ready else "degraded",
                 "model": PRIMARY_MODEL,
                 "heretic_model": PRIMARY_MODEL,
                 "heretic_online": hw["online"],
                 "hardware": hw,
             },
-            headers=cors_headers(),
+            status=200 if is_ready else 503,
+            headers=cors_headers({"Retry-After": "5"} if not is_ready else None),
         )
 
     # 4. Authentication Endpoints (Resend 6-digit OTP)
@@ -534,7 +871,7 @@ echo "     ornith \\"Explain this repository\\""
             headers=cors_headers(),
         )
 
-    # 5. Authenticated Developer Console APIs (/api/keys, /api/presets, /api/admin/users, /api/logs, /api/sandbox/run, /api/media/extract-frames)
+    # 5. Authenticated Developer Console APIs (/api/*)
     if path.startswith("/api/"):
         tok = extract_session_token(req)
         sess_user = await loop.run_in_executor(None, authdb.get_session_user, tok)
@@ -771,89 +1108,130 @@ echo "     ornith \\"Explain this repository\\""
 
         return json_err(404, f"Unknown API endpoint: {path}")
 
-    # 6. Verify API Key / Session for /v1/* endpoints
+    # 6. Check Method Not Allowed (405) for known /v1 endpoints BEFORE or AFTER auth
+    if path in POST_ONLY_V1_PATHS and req.method != "POST":
+        return json_err(
+            405,
+            f"Method {req.method} not allowed for {path}. Use POST.",
+            "invalid_request_error",
+            code="method_not_allowed",
+            extra_headers={"Allow": "POST"},
+        )
+    if path in GET_ONLY_V1_PATHS and req.method != "GET":
+        return json_err(
+            405,
+            f"Method {req.method} not allowed for {path}. Use GET.",
+            "invalid_request_error",
+            code="method_not_allowed",
+            extra_headers={"Allow": "GET"},
+        )
+
+    # 6b. Verify API Key / Session for /v1/* endpoints
     cred = extract_api_credential(req)
     if not cred:
-        await asyncio.sleep(0.35)
+        await asyncio.sleep(0.15)
         log_access(key=None, path=path, status=401, ip=ip)
         authdb.record_audit("anonymous", "api", f"unauthorized:{path}", 401, ip=ip)
         return json_err(
             401,
             "Missing or invalid API key. Pass `Authorization: Bearer sk-ornith-...` or `x-api-key: sk-ornith-...`.",
             "authentication_error",
+            code="invalid_api_key",
         )
 
     key_name = cred["key_name"]
     user_email = cred["user_email"]
     train_ok = cred["train_ok"]
     allow_cmd = cred["allow_command"]
-    rpm_limit = cred["rate_limit_rpm"]
+    rpm_limit = int(cred["rate_limit_rpm"] or 120)
 
-    allowed, _ = authdb.check_rate_limit(f"key:{cred['key_id']}:{user_email}", max_per_window=rpm_limit, window_secs=60.0)
+    allowed, remaining = authdb.check_rate_limit(
+        f"key:{cred['key_id']}:{user_email}", max_per_window=rpm_limit, window_secs=60.0
+    )
+    rl_headers = {
+        "X-RateLimit-Limit-Requests": str(rpm_limit),
+        "X-RateLimit-Remaining-Requests": str(remaining),
+        "X-RateLimit-Reset-Requests": "60s",
+    }
     if not allowed:
-        return json_err(429, f"Rate limit exceeded ({rpm_limit} requests/min).")
+        return json_err(
+            429,
+            f"Rate limit exceeded ({rpm_limit} requests/min). Please retry after a few seconds.",
+            "rate_limit_error",
+            code="rate_limit_exceeded",
+            extra_headers={"Retry-After": "10", **rl_headers},
+        )
 
     # 7. Saved Chats & Feedback Endpoints
     if req.method == "GET" and path == "/v1/chats":
         rows = await loop.run_in_executor(
             None, chatdb.list_chats, key_name, req.query.get("limit", 50), req.query.get("before")
         )
-        return web.json_response({"chats": rows}, headers=cors_headers())
+        return web.json_response({"chats": rows}, headers=cors_headers(rl_headers))
 
     if req.method == "GET" and re.fullmatch(r"/v1/chats/[0-9a-f]{16}", path):
         c = await loop.run_in_executor(None, chatdb.get_chat, key_name, path.rsplit("/", 1)[1])
-        return web.json_response(c, headers=cors_headers()) if c else json_err(404, "No such chat for this key.")
+        return web.json_response(c, headers=cors_headers(rl_headers)) if c else json_err(404, "No such chat for this key.", extra_headers=rl_headers)
 
     if req.method == "GET" and re.fullmatch(r"/v1/images/[0-9a-f]{32}\.\w+", path):
         p = await loop.run_in_executor(None, chatdb.image_path, key_name, path.rsplit("/", 1)[1])
-        return web.FileResponse(p, headers=cors_headers()) if p else json_err(404, "No such image for this key.")
+        return web.FileResponse(p, headers=cors_headers(rl_headers)) if p else json_err(404, "No such image for this key.", extra_headers=rl_headers)
 
     if req.method == "POST" and path == "/v1/feedback":
         try:
             fb = await req.json()
-            assert fb.get("rating") in ("good", "bad") and re.fullmatch(r"[0-9a-f]{16}", fb.get("chat_id", ""))
+            assert isinstance(fb, dict) and fb.get("rating") in ("good", "bad") and re.fullmatch(r"[0-9a-f]{16}", fb.get("chat_id", ""))
         except Exception:
-            return json_err(400, 'Send {"chat_id": "...", "rating": "good"|"bad", "correction": "..."}')
+            return json_err(400, 'Send {"chat_id": "...", "rating": "good"|"bad", "correction": "..."}', extra_headers=rl_headers)
         ok = await loop.run_in_executor(
             None, chatdb.add_feedback, key_name, fb["chat_id"], fb["rating"], fb.get("correction"), fb.get("note")
         )
-        return web.json_response({"ok": True}, headers=cors_headers()) if ok else json_err(404, "No such chat.")
+        return web.json_response({"ok": True}, headers=cors_headers(rl_headers)) if ok else json_err(404, "No such chat.", extra_headers=rl_headers)
 
-    # 8. GET /v1/models
+    # 8. GET /v1/models (Deduplicated & Strictly Validated)
     if req.method == "GET" and path == "/v1/models":
         try:
-            async with req.app["session"].get(f"{UPSTREAM}/v1/models", timeout=aiohttp.ClientTimeout(total=5)) as up:
+            async with req.app["session"].get(f"{UPSTREAM}/v1/models", timeout=aiohttp.ClientTimeout(total=4)) as up:
+                if up.status != 200:
+                    return json_err(503, "Model inference service temporarily unavailable.", "service_unavailable", extra_headers={"Retry-After": "5", **rl_headers})
                 raw_data = await up.json()
-                clean_models = []
+                status_by_id: Dict[str, str] = {}
                 for m in raw_data.get("data", []):
-                    mid = m.get("id", PRIMARY_MODEL)
-                    st_val = (m.get("status") or {}).get("value", "ready")
-                    card = {
-                        "id": mid,
-                        "object": "model",
-                        "created": int(m.get("created") or 1740000000),
-                        "owned_by": "ornith-ai",
-                        "status": st_val,
-                        "context_window": 131072,
-                        "modalities": ["text", "image", "video"],
-                    }
-                    if mid == PRIMARY_MODEL:
-                        card["spec"] = MODEL_SPEC
-                    clean_models.append(card)
-                return web.json_response({"object": "list", "data": clean_models}, headers=cors_headers())
+                    if isinstance(m, dict) and m.get("id"):
+                        status_by_id[m["id"]] = (m.get("status") or {}).get("value", "loaded")
+                seen_ids = set()
+                clean_models = []
+                for card in MODEL_CATALOG:
+                    mid = card["id"]
+                    if mid in seen_ids:
+                        continue
+                    seen_ids.add(mid)
+                    c_copy = dict(card)
+                    if mid in status_by_id:
+                        c_copy["status"] = status_by_id[mid]
+                    clean_models.append(c_copy)
+                return web.json_response({"object": "list", "data": clean_models}, headers=cors_headers(rl_headers))
         except Exception:
-            return json_err(503, "Model inference service temporarily unavailable.")
+            return json_err(
+                503,
+                "Model inference service temporarily unavailable.",
+                "service_unavailable",
+                code="service_unavailable",
+                extra_headers={"Retry-After": "5", **rl_headers},
+            )
 
     # 8b. OpenAI-Compatible Image Generation & Editing Endpoints (/v1/images/generations, /v1/images/edits)
     if req.method == "POST" and path in ("/v1/images/generations", "/v1/images/edits"):
         try:
             body = await req.json()
         except Exception:
-            return json_err(400, "JSON body required with `prompt`.")
+            return json_err(400, "JSON body required with `prompt`.", extra_headers=rl_headers)
+        if not isinstance(body, dict):
+            return json_err(400, "JSON body must be an object.", extra_headers=rl_headers)
 
         prompt = str(body.get("prompt") or body.get("instruction") or "").strip()
         if not prompt:
-            return json_err(400, "`prompt` is required for image generation.")
+            return json_err(400, "`prompt` is required for image generation.", param="prompt", extra_headers=rl_headers)
 
         size_str = str(body.get("size") or "1024x1024").lower()
         width = int(body.get("width") or 1024)
@@ -880,7 +1258,7 @@ echo "     ornith \\"Explain this repository\\""
         latency_ms = (time.time() - t0) * 1000
         if "error" in res:
             authdb.record_audit(user_email, "image", path, 503, latency_ms=latency_ms, ip=ip, detail=res)
-            return json_err(503, res["error"], "server_error")
+            return json_err(503, res["error"], "server_error", extra_headers={"Retry-After": "5", **rl_headers})
 
         authdb.record_key_usage(cred["key_id"], 0, 0)
         authdb.record_audit(
@@ -892,7 +1270,7 @@ echo "     ornith \\"Explain this repository\\""
             ip=ip,
             detail={"prompt": prompt[:160], "urls": [d["url"] for d in res.get("data", [])]},
         )
-        return web.json_response(res, headers=cors_headers())
+        return web.json_response(res, headers=cors_headers(rl_headers))
 
     # 9. Model Inference Endpoints (/v1/chat/completions, /v1/completions, /v1/messages, /v1/messages/count_tokens, /v1/responses)
     if req.method == "POST" and path in (
@@ -903,39 +1281,74 @@ echo "     ornith \\"Explain this repository\\""
         "/v1/responses",
     ):
         if (req.content_length or 0) > MAX_BODY:
-            return json_err(413, "Request payload exceeds 35 MB limit.")
+            return json_err(413, "Request payload exceeds 35 MB limit.", extra_headers=rl_headers)
         try:
             body = await req.json()
         except Exception:
-            return json_err(400, "Request body must be valid JSON.")
+            return json_err(400, "Request body must be valid JSON.", code="invalid_json", extra_headers=rl_headers)
 
-        requested_model = body.get("model")
-        target_model = resolve_target_model(requested_model)
-        body["model"] = target_model
+        if not isinstance(body, dict):
+            return json_err(400, "Request body must be a JSON object.", code="invalid_json", extra_headers=rl_headers)
+
+        # Validate model name first (returns 404 model_not_found on unknown models; defaults to ornith-1.5-35b-uncensored if omitted)
+        client_model, upstream_model, model_err = resolve_and_validate_model(body.get("model"))
+        if model_err or not client_model or not upstream_model:
+            return json_err(
+                404,
+                model_err or "Model not found.",
+                "invalid_request_error",
+                param="model",
+                code="model_not_found",
+                extra_headers=rl_headers,
+            )
+
+        # Validate request parameters (messages, roles, max_tokens, temperature, top_p, n, response_format)
+        val_err = validate_chat_or_completion_input(path, body)
+        if val_err:
+            st_code, err_msg, err_type, err_param, err_code = val_err
+            return json_err(st_code, err_msg, err_type, param=err_param, code=err_code, extra_headers=rl_headers)
+
+        body["model"] = upstream_model
         t0 = time.time()
 
         guardrail_block = _check_inference_host_guardrail(body)
         if guardrail_block:
             authdb.record_audit(user_email, "security", f"blocked_host_exfil:{path}", 403, ip=ip)
-            return json_err(403, guardrail_block, "security_guardrail_error")
+            return json_err(403, guardrail_block, "security_guardrail_error", code="host_guardrail_blocked", extra_headers=rl_headers)
 
-        # Default to fast, visible token streaming (enable_thinking=False) unless caller explicitly opts into thinking.
-        # This prevents the 35B model from spending 40-60s on hidden reasoning_content before streaming code/answers.
+        # Configure thinking mode:
+        # Default enable_thinking=False so visible content streams immediately and small max_tokens (e.g. 16)
+        # never exhaust their budget on hidden reasoning tokens.
         explicit_think = body.pop("enable_thinking", None)
         ct_kwargs = dict(body.get("chat_template_kwargs") or {})
-        if explicit_think is not None:
+        max_tok_val = body.get("max_tokens") or body.get("max_completion_tokens")
+        rf_type = (body.get("response_format") or {}).get("type") if isinstance(body.get("response_format"), dict) else None
+
+        if rf_type in ("json_object", "json_schema") or (isinstance(max_tok_val, int) and max_tok_val <= 64):
+            # Force thinking off for JSON grammar mode or tiny max_tokens so content is never empty
+            ct_kwargs["enable_thinking"] = False
+        elif explicit_think is not None:
             ct_kwargs["enable_thinking"] = bool(explicit_think)
         elif "enable_thinking" not in ct_kwargs:
             has_reasoning_opt = bool(body.get("reasoning_effort")) or bool(body.get("thinking"))
             ct_kwargs["enable_thinking"] = has_reasoning_opt
         body["chat_template_kwargs"] = ct_kwargs
 
+        # Enforce greedy determinism when temperature == 0 or seed is provided
+        if body.get("temperature") is not None and float(body["temperature"]) == 0.0:
+            body["temperature"] = 0.0
+            body["top_k"] = 1
+            body["top_p"] = 1.0
+            if body.get("seed") is None:
+                body["seed"] = 1
+        elif body.get("seed") is not None:
+            try:
+                body["seed"] = int(body["seed"])
+            except Exception:
+                body["seed"] = 1
+
         # 9a. Anthropic /v1/messages & /v1/messages/count_tokens (Claude Code CLI & Anthropic SDK)
         if path in ("/v1/messages", "/v1/messages/count_tokens"):
-            # Ornith's Jinja chat template requires at most ONE system message at index 0.
-            # Claude Code sends `system` as an array of multiple blocks, which llama-server expands into multiple
-            # consecutive system messages—triggering "System message must be at the beginning."
-            # Collapse all system blocks into a single string.
             sys_parts: List[str] = []
             raw_sys = body.get("system")
             if isinstance(raw_sys, str) and raw_sys.strip():
@@ -962,25 +1375,34 @@ echo "     ornith \\"Explain this repository\\""
                         cleaned_msgs.append(m)
                 body["messages"] = cleaned_msgs
 
+            if not cleaned_msgs:
+                return json_err(400, "'messages' must contain at least one user or assistant message.", param="messages", extra_headers=rl_headers)
+
             if sys_parts:
                 body["system"] = "\n\n".join(sys_parts)
             else:
-                body.pop("system", None)
+                body["system"] = MODEL_IDENTITY_NOTES.get(client_model, MODEL_IDENTITY_NOTES[PRIMARY_MODEL])
 
             stream = bool(body.get("stream")) and path == "/v1/messages"
-            up = await req.app["session"].post(
-                UPSTREAM + path,
-                json=body,
-                timeout=aiohttp.ClientTimeout(total=None, connect=None, sock_connect=None, sock_read=None),
-            )
-            hdrs = {
-                "X-Ornith-Model": target_model,
-                **cors_headers(),
-            }
             try:
+                up = await req.app["session"].post(
+                    UPSTREAM + path,
+                    json=body,
+                    timeout=aiohttp.ClientTimeout(total=None, connect=10, sock_connect=10, sock_read=None),
+                )
+            except Exception:
+                return json_err(503, "Model inference server is temporarily unreachable.", "service_unavailable", extra_headers={"Retry-After": "5", **rl_headers})
+
+            hdrs = {"X-Ornith-Model": client_model, **cors_headers(rl_headers)}
+            try:
+                if up.status != 200:
+                    raw_err = await up.read()
+                    st_err, err_payload = parse_upstream_error(up.status, raw_err)
+                    return web.json_response(err_payload, status=st_err, headers=hdrs)
+
                 if stream:
                     resp = web.StreamResponse(
-                        status=up.status,
+                        status=200,
                         headers={
                             "Content-Type": "text/event-stream",
                             "Cache-Control": "no-cache",
@@ -995,7 +1417,7 @@ echo "     ornith \\"Explain this repository\\""
                     await resp.write_eof()
                     latency_ms = (time.time() - t0) * 1000
                     authdb.record_key_usage(cred["key_id"], 0, 0)
-                    authdb.record_audit(user_email, "anthropic", f"{path} (stream)", up.status, latency_ms=latency_ms, ip=ip)
+                    authdb.record_audit(user_email, "anthropic", f"{path} (stream)", 200, latency_ms=latency_ms, ip=ip)
                     return resp
                 else:
                     data = await up.read()
@@ -1009,25 +1431,34 @@ echo "     ornith \\"Explain this repository\\""
                     except Exception:
                         pass
                     authdb.record_key_usage(cred["key_id"], tin, tout)
-                    authdb.record_audit(user_email, "anthropic", path, up.status, latency_ms=latency_ms, tokens_in=tin, tokens_out=tout, ip=ip)
-                    return web.Response(body=data, status=up.status, content_type="application/json", headers=hdrs)
+                    authdb.record_audit(user_email, "anthropic", path, 200, latency_ms=latency_ms, tokens_in=tin, tokens_out=tout, ip=ip)
+                    return web.Response(body=data, status=200, content_type="application/json", headers=hdrs)
             finally:
                 up.release()
 
         # 9b. OpenAI Codex /v1/responses
         if path == "/v1/responses":
-            body, _, _ = _normalize_responses_payload(body)
+            body, _, _ = _normalize_responses_payload(body, upstream_model)
             stream = bool(body.get("stream", True))
-            up = await req.app["session"].post(
-                f"{UPSTREAM}/v1/responses",
-                json=body,
-                timeout=aiohttp.ClientTimeout(total=None, connect=None, sock_connect=None, sock_read=None),
-            )
-            hdrs = {"X-Ornith-Model": target_model, **cors_headers()}
             try:
+                up = await req.app["session"].post(
+                    f"{UPSTREAM}/v1/responses",
+                    json=body,
+                    timeout=aiohttp.ClientTimeout(total=None, connect=10, sock_connect=10, sock_read=None),
+                )
+            except Exception:
+                return json_err(503, "Model inference server is temporarily unreachable.", "service_unavailable", extra_headers={"Retry-After": "5", **rl_headers})
+
+            hdrs = {"X-Ornith-Model": client_model, **cors_headers(rl_headers)}
+            try:
+                if up.status != 200:
+                    raw_err = await up.read()
+                    st_err, err_payload = parse_upstream_error(up.status, raw_err)
+                    return web.json_response(err_payload, status=st_err, headers=hdrs)
+
                 if stream:
                     resp = web.StreamResponse(
-                        status=up.status,
+                        status=200,
                         headers={
                             "Content-Type": "text/event-stream",
                             "Cache-Control": "no-cache",
@@ -1042,23 +1473,23 @@ echo "     ornith \\"Explain this repository\\""
                     await resp.write_eof()
                     latency_ms = (time.time() - t0) * 1000
                     authdb.record_key_usage(cred["key_id"], 0, 0)
-                    authdb.record_audit(user_email, "responses", "/v1/responses (stream)", up.status, latency_ms=latency_ms, ip=ip)
+                    authdb.record_audit(user_email, "responses", "/v1/responses (stream)", 200, latency_ms=latency_ms, ip=ip)
                     return resp
                 else:
                     data = await up.read()
                     latency_ms = (time.time() - t0) * 1000
                     authdb.record_key_usage(cred["key_id"], 0, 0)
-                    authdb.record_audit(user_email, "responses", "/v1/responses", up.status, latency_ms=latency_ms, ip=ip)
-                    return web.Response(body=data, status=up.status, content_type="application/json", headers=hdrs)
+                    authdb.record_audit(user_email, "responses", "/v1/responses", 200, latency_ms=latency_ms, ip=ip)
+                    return web.Response(body=data, status=200, content_type="application/json", headers=hdrs)
             finally:
                 up.release()
 
         # 9c. OpenAI /v1/chat/completions & /v1/completions
-        if path == "/v1/chat/completions" and isinstance(body.get("messages"), list):
+        if path == "/v1/chat/completions":
             sys_chunks: List[str] = []
             non_sys_msgs: List[Dict[str, Any]] = []
             for m in body["messages"]:
-                if isinstance(m, dict) and m.get("role") in ("system", "developer"):
+                if m.get("role") in ("system", "developer"):
                     mc = m.get("content")
                     if isinstance(mc, str) and mc.strip():
                         sys_chunks.append(mc.strip())
@@ -1068,10 +1499,31 @@ echo "     ornith \\"Explain this repository\\""
                                 sys_chunks.append(part["text"].strip())
                 else:
                     non_sys_msgs.append(m)
-            if sys_chunks:
-                body["messages"] = [{"role": "system", "content": "\n\n".join(sys_chunks)}, *non_sys_msgs]
-            else:
-                body["messages"] = non_sys_msgs
+
+            if not non_sys_msgs:
+                return json_err(
+                    400,
+                    "'messages' must include at least one non-system message (e.g. role 'user').",
+                    "invalid_request_error",
+                    param="messages",
+                    code="invalid_messages",
+                    extra_headers=rl_headers,
+                )
+
+            # Use a compact model-identity system note ONLY when no system prompt was provided (or for ornith-calendar)
+            # This adds only ~10 tokens (eliminating the old 1,045-token overhead) while ensuring each model
+            # accurately knows its Ornith identity.
+            if not sys_chunks:
+                sys_chunks.append(MODEL_IDENTITY_NOTES.get(client_model, MODEL_IDENTITY_NOTES[PRIMARY_MODEL]))
+            elif client_model == "ornith-calendar" and "ornith-calendar" not in " ".join(sys_chunks).lower():
+                sys_chunks.insert(0, MODEL_IDENTITY_NOTES["ornith-calendar"])
+
+            body["messages"] = [{"role": "system", "content": "\n\n".join(sys_chunks)}, *non_sys_msgs]
+
+            # llama-server grammar fails if both `tools` and `response_format: json_object` are passed together
+            if rf_type in ("json_object", "json_schema") and body.get("tools"):
+                body.pop("tools", None)
+                body.pop("tool_choice", None)
 
         stream = bool(body.get("stream"))
         chat_id = uuid.uuid4().hex[:16]
@@ -1089,7 +1541,7 @@ echo "     ornith \\"Explain this repository\\""
                 secs=secs,
                 chat=chat_id,
                 stream=stream,
-                model=target_model,
+                model=client_model,
                 tokens_in=tin,
                 tokens_out=tout,
             )
@@ -1097,7 +1549,7 @@ echo "     ornith \\"Explain this repository\\""
             authdb.record_audit(
                 user_email,
                 "chat",
-                f"{path} ({target_model})",
+                f"{path} ({client_model})",
                 status,
                 latency_ms=secs * 1000,
                 tokens_in=tin,
@@ -1123,95 +1575,255 @@ echo "     ornith \\"Explain this repository\\""
                 usage,
             )
 
+        # Server tools (sandbox, web_search, generate_image) are STRICTLY OPT-IN:
+        # Only activated when caller explicitly passes `server_tools: true`, non-empty `enabled_tools`,
+        # or `model: "ornith-1.5-35b-agent"`.
         enabled_tool_names = body.pop("enabled_tools", None)
         server_tools_flag = body.pop("server_tools", None)
-        last_user_text = ""
-        if isinstance(body.get("messages"), list) and body["messages"]:
-            last_mc = body["messages"][-1].get("content", "")
-            if isinstance(last_mc, str):
-                last_user_text = last_mc
-            elif isinstance(last_mc, list):
-                last_user_text = " ".join(p.get("text", "") for p in last_mc if isinstance(p, dict))
-        auto_tool_intent = bool(
-            re.search(
-                r"\b(generate an? image|create an? image|draw an? image|make an? image|edit (?:this |the )?image|search the web|web search|https?://[^\s]+)\b",
-                last_user_text,
-                re.IGNORECASE,
-            )
-        )
         should_use_server_tools = (
-            server_tools_flag is True
-            or (isinstance(enabled_tool_names, list) and len(enabled_tool_names) > 0)
-            or (server_tools_flag is None and auto_tool_intent)
-        )
-        if (
-            path == "/v1/chat/completions"
+            (
+                server_tools_flag is True
+                or (isinstance(enabled_tool_names, list) and len(enabled_tool_names) > 0)
+                or client_model == "ornith-1.5-35b-agent"
+            )
+            and rf_type not in ("json_object", "json_schema")
             and not body.get("tools")
-            and should_use_server_tools
             and cred["allow_tools"]
-        ):
-            return await run_agent_with_server_tools(
-                req,
-                body,
-                chat_id,
-                save_turn,
-                UPSTREAM,
-                target_model,
-                allow_command=allow_cmd,
-                enabled_tool_names=enabled_tool_names,
-            )
-
-        up = await req.app["session"].request(
-            "POST",
-            UPSTREAM + path,
-            json=body,
-            timeout=aiohttp.ClientTimeout(total=None, connect=None, sock_connect=None, sock_read=None),
         )
-        hdrs = {"X-Chat-Id": chat_id, "X-Ornith-Model": target_model, **cors_headers()}
-        try:
-            if stream:
-                resp = web.StreamResponse(
-                    status=up.status,
-                    headers={
-                        "Content-Type": "text/event-stream",
-                        "Cache-Control": "no-cache",
-                        "X-Accel-Buffering": "no",
-                        **hdrs,
-                    },
+
+        if path == "/v1/chat/completions" and should_use_server_tools:
+            async with _LONG_REQ_SEM:
+                return await run_agent_with_server_tools(
+                    req,
+                    body,
+                    chat_id,
+                    save_turn,
+                    UPSTREAM,
+                    client_model,
+                    upstream_model,
+                    allow_command=allow_cmd,
+                    enabled_tool_names=enabled_tool_names,
+                    rl_headers=rl_headers,
                 )
-                await resp.prepare(req)
-                await resp.write(b": stream-open\n\n")
-                col = chatdb.StreamCollector()
-                async for chunk in up.content.iter_any():
-                    col.feed(chunk)
-                    await resp.write(chunk)
-                await resp.write_eof()
-                save_turn(up.status, *col.result())
-                return resp
 
-            read = asyncio.ensure_future(up.read())
-            done, _ = await asyncio.wait({read}, timeout=5)
-            if read in done:
-                data = read.result()
-                save_turn(up.status, *chatdb.from_response(data))
-                return web.Response(body=data, status=up.status, content_type="application/json", headers=hdrs)
+        hdrs = {"X-Chat-Id": chat_id, "X-Ornith-Model": client_model, **cors_headers(rl_headers)}
 
-            resp = web.StreamResponse(
-                status=200,
-                headers={"Content-Type": "application/json", "X-Accel-Buffering": "no", **hdrs},
-            )
-            await resp.prepare(req)
-            while not read.done():
-                await asyncio.wait({read}, timeout=10)
-                if not read.done():
-                    await resp.write(b" ")
-            data = read.result()
-            await resp.write(data)
-            await resp.write_eof()
-            save_turn(up.status, *chatdb.from_response(data))
-            return resp
-        finally:
-            up.release()
+        # Handle n > 1 cleanly for non-streaming /v1/chat/completions so it never deadlocks the 2-slot GPU router
+        n_choices = int(body.get("n") or 1)
+        if path == "/v1/chat/completions" and n_choices > 1 and not stream:
+            single_body = {**body, "n": 1, "stream": False}
+            choices_out = []
+            total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            first_meta: Dict[str, Any] = {}
+            for choice_idx in range(n_choices):
+                req_copy = dict(single_body)
+                if req_copy.get("seed") is not None and float(req_copy.get("temperature", 0.7)) > 0:
+                    req_copy["seed"] = int(req_copy["seed"]) + choice_idx
+                try:
+                    up = await req.app["session"].post(
+                        UPSTREAM + path,
+                        json=req_copy,
+                        timeout=aiohttp.ClientTimeout(total=120, connect=10),
+                    )
+                except Exception:
+                    return json_err(503, "Model inference server is temporarily unreachable.", "service_unavailable", extra_headers={"Retry-After": "5", **rl_headers})
+                raw_b = await up.read()
+                up.release()
+                if up.status != 200:
+                    st_err, err_payload = parse_upstream_error(up.status, raw_b)
+                    return web.json_response(err_payload, status=st_err, headers=hdrs)
+                parsed = json.loads(raw_b)
+                if not first_meta:
+                    first_meta = parsed
+                ch = (parsed.get("choices") or [{}])[0]
+                ch["index"] = choice_idx
+                choices_out.append(ch)
+                u = parsed.get("usage") or {}
+                if choice_idx == 0:
+                    total_usage["prompt_tokens"] = int(u.get("prompt_tokens") or 0)
+                total_usage["completion_tokens"] += int(u.get("completion_tokens") or 0)
+            total_usage["total_tokens"] = total_usage["prompt_tokens"] + total_usage["completion_tokens"]
+            combined_resp = {
+                "id": first_meta.get("id") or f"chatcmpl-{chat_id}",
+                "object": "chat.completion",
+                "created": first_meta.get("created") or int(time.time()),
+                "model": client_model,
+                "choices": choices_out,
+                "usage": total_usage,
+            }
+            ans0 = ((choices_out[0].get("message") or {}).get("content")) if choices_out else ""
+            save_turn(200, ans0, None, None, total_usage)
+            return web.json_response(combined_resp, status=200, headers=hdrs)
+
+        # For /v1/chat/completions, ALWAYS stream from llama-server upstream (even when client stream=False!)
+        # Why?
+        # 1. Upstream errors (like 161K token context overflow) return HTTP 400 in <0.4s before any 200 header is sent.
+        # 2. Long non-streaming requests (>100s) receive HTTP 200 + periodic whitespace keepalives (`b" "`) after 6s,
+        #    completely defeating Cloudflare's 100-second non-streaming origin timeout (524)!
+        # 3. Long streaming requests receive `: keepalive\n\n` comments and a guaranteed closing `finish_reason` + `[DONE]`.
+        use_long_sem = is_long_request(body, server_tools_enabled=False)
+
+        async def _execute_chat_or_completion() -> web.StreamResponse:
+            if path == "/v1/chat/completions":
+                want_usage = bool((body.get("stream_options") or {}).get("include_usage", True))
+                up_body = {
+                    **body,
+                    "stream": True,
+                    "stream_options": {"include_usage": True},
+                }
+                try:
+                    up = await req.app["session"].post(
+                        UPSTREAM + path,
+                        json=up_body,
+                        timeout=aiohttp.ClientTimeout(total=None, connect=10, sock_connect=10, sock_read=None),
+                    )
+                except Exception:
+                    return json_err(
+                        503,
+                        "Model inference server is temporarily unreachable.",
+                        "service_unavailable",
+                        code="service_unavailable",
+                        extra_headers={"Retry-After": "5", **rl_headers},
+                    )
+
+                try:
+                    # Check upstream status BEFORE preparing a 200 response!
+                    if up.status != 200:
+                        raw_err = await up.read()
+                        st_err, err_payload = parse_upstream_error(up.status, raw_err)
+                        save_turn(st_err, None, None, None, {})
+                        return web.json_response(err_payload, status=st_err, headers=hdrs)
+
+                    col = chatdb.StreamCollector()
+
+                    if stream:
+                        resp = web.StreamResponse(
+                            status=200,
+                            headers={
+                                "Content-Type": "text/event-stream",
+                                "Cache-Control": "no-cache",
+                                "X-Accel-Buffering": "no",
+                                **hdrs,
+                            },
+                        )
+                        await resp.prepare(req)
+                        await resp.write(b": stream-open\n\n")
+
+                        it = up.content.iter_any().__aiter__()
+                        stream_aborted = False
+                        while True:
+                            try:
+                                chunk = await asyncio.wait_for(it.__anext__(), timeout=8.0)
+                            except asyncio.TimeoutError:
+                                await resp.write(b": keepalive\n\n")
+                                continue
+                            except StopAsyncIteration:
+                                break
+                            except Exception:
+                                stream_aborted = True
+                                break
+
+                            col.feed(chunk)
+                            # Rewrite model name in chunk if client requested an alias like ornith-1.5-35b
+                            if client_model != upstream_model and b'"model":' in chunk:
+                                chunk = chunk.replace(
+                                    f'"model":"{upstream_model}"'.encode(),
+                                    f'"model":"{client_model}"'.encode(),
+                                )
+                            await resp.write(chunk)
+
+                        # Guarantee a closing finish_reason chunk and data: [DONE] even if upstream closed early
+                        if not col.finish_reason:
+                            fallback_fin = "length" if (
+                                isinstance(max_tok_val, int)
+                                and (col.usage.get("completion_tokens") or 0) >= max_tok_val
+                            ) else "stop"
+                            closing_ev = {
+                                "id": col.cmpl_id or f"chatcmpl-{chat_id}",
+                                "object": "chat.completion.chunk",
+                                "created": col.created or int(time.time()),
+                                "model": client_model,
+                                "choices": [{"index": 0, "delta": {}, "finish_reason": fallback_fin}],
+                            }
+                            await resp.write(b"data: " + json.dumps(closing_ev).encode("utf-8") + b"\n\n")
+                        if not col.saw_done:
+                            await resp.write(b"data: [DONE]\n\n")
+
+                        await resp.write_eof()
+                        save_turn(200 if not stream_aborted else 500, *col.result())
+                        return resp
+
+                    else:
+                        # Client requested stream=False, but we consume SSE from llama-server so we can:
+                        # (a) return immediately if finished within 6 seconds, OR
+                        # (b) stream whitespace keepalives (`b" "`) every 5s so Cloudflare 100s timeout never triggers!
+                        async def _consume_all() -> None:
+                            async for chunk in up.content.iter_any():
+                                col.feed(chunk)
+
+                        consume_task = asyncio.ensure_future(_consume_all())
+                        done, _ = await asyncio.wait({consume_task}, timeout=6.0)
+                        if consume_task in done:
+                            consume_task.result()
+                            payload_out = col.build_chat_completion(f"chatcmpl-{chat_id}", client_model)
+                            save_turn(200, *col.result())
+                            return web.json_response(payload_out, status=200, headers=hdrs)
+
+                        # Long non-streaming generation (>6s): open 200 application/json stream and send b" " every 5s
+                        resp = web.StreamResponse(
+                            status=200,
+                            headers={
+                                "Content-Type": "application/json",
+                                "Cache-Control": "no-cache",
+                                "X-Accel-Buffering": "no",
+                                **hdrs,
+                            },
+                        )
+                        await resp.prepare(req)
+                        await resp.write(b" ")
+                        while not consume_task.done():
+                            await asyncio.wait({consume_task}, timeout=5.0)
+                            if not consume_task.done():
+                                await resp.write(b" ")
+                        consume_task.result()
+                        payload_out = col.build_chat_completion(f"chatcmpl-{chat_id}", client_model)
+                        await resp.write(json.dumps(payload_out).encode("utf-8"))
+                        await resp.write_eof()
+                        save_turn(200, *col.result())
+                        return resp
+                finally:
+                    up.release()
+
+            # Legacy /v1/completions path
+            try:
+                up = await req.app["session"].post(
+                    UPSTREAM + path,
+                    json=body,
+                    timeout=aiohttp.ClientTimeout(total=None, connect=10, sock_connect=10, sock_read=None),
+                )
+            except Exception:
+                return json_err(
+                    503,
+                    "Model inference server is temporarily unreachable.",
+                    "service_unavailable",
+                    extra_headers={"Retry-After": "5", **rl_headers},
+                )
+            try:
+                if up.status != 200:
+                    raw_err = await up.read()
+                    st_err, err_payload = parse_upstream_error(up.status, raw_err)
+                    return web.json_response(err_payload, status=st_err, headers=hdrs)
+                data = await up.read()
+                save_turn(200, *chatdb.from_response(data))
+                return web.Response(body=data, status=200, content_type="application/json", headers=hdrs)
+            finally:
+                up.release()
+
+        if use_long_sem:
+            async with _LONG_REQ_SEM:
+                return await _execute_chat_or_completion()
+        else:
+            return await _execute_chat_or_completion()
 
     return json_err(404, f"Endpoint {path} not found. Visit / for the Ornith Developer Console & API Docs.")
 
@@ -1222,11 +1834,16 @@ async def run_agent_with_server_tools(
     chat_id: str,
     save_turn,
     target_upstream: str = UPSTREAM,
-    target_model: str = PRIMARY_MODEL,
+    client_model: str = PRIMARY_MODEL,
+    upstream_model: str = PRIMARY_MODEL,
     allow_command: bool = True,
     enabled_tool_names: Optional[List[str]] = None,
+    rl_headers: Optional[Dict[str, str]] = None,
 ) -> web.StreamResponse:
-    """Autonomous multi-round server-tool loop (web_search, read_webpage, generate_image, edit_image, run_sandbox_code, run_command)."""
+    """Opt-in multi-round server-tool loop (web_search, read_webpage, generate_image, edit_image, run_sandbox_code, run_command).
+    Capped by steps (max 3 tool rounds) and time (45s budget), never returns HTTP 200 on Round-0 upstream errors,
+    and ensures any sandbox code executed is included in `content` if the model only narrated the result.
+    """
     stream = bool(body.get("stream"))
     want_usage = bool((body.get("stream_options") or {}).get("include_usage"))
     msgs = [dict(m) for m in body.get("messages", [])]
@@ -1237,73 +1854,107 @@ async def run_agent_with_server_tools(
         msgs.insert(0, {"role": "system", "content": note})
 
     active_tools = server_tools.get_tools_for_caller(allow_command=allow_command, enabled_names=enabled_tool_names)
-    base = {k: v for k, v in body.items() if k not in ("messages", "stream", "stream_options", "tools", "tool_choice")}
+    base = {
+        k: v
+        for k, v in body.items()
+        if k not in ("messages", "stream", "stream_options", "tools", "tool_choice", "n")
+    }
+    base["model"] = upstream_model
     cid, created = "chatcmpl-" + chat_id, int(time.time())
     hdrs = {
         "X-Chat-Id": chat_id,
-        "X-Ornith-Model": target_model,
+        "X-Ornith-Model": client_model,
         "X-Accel-Buffering": "no",
         "Cache-Control": "no-cache",
-        **cors_headers(),
+        **cors_headers(rl_headers),
     }
-    resp = web.StreamResponse(
-        status=200,
-        headers={"Content-Type": "text/event-stream" if stream else "application/json", **hdrs},
-    )
-    await resp.prepare(req)
-    if stream:
-        await resp.write(b": stream-open\n\n")
+
+    resp: Optional[web.StreamResponse] = None
+
+    async def ensure_prepared() -> web.StreamResponse:
+        nonlocal resp
+        if resp is None:
+            resp = web.StreamResponse(
+                status=200,
+                headers={"Content-Type": "text/event-stream" if stream else "application/json", **hdrs},
+            )
+            await resp.prepare(req)
+            if stream:
+                await resp.write(b": stream-open\n\n")
+        return resp
 
     async def sse(delta, finish=None, usage=None, tool_trace=None):
+        r = await ensure_prepared()
         ev: Dict[str, Any] = {
             "id": cid,
             "object": "chat.completion.chunk",
             "created": created,
-            "model": target_model,
+            "model": client_model,
             "choices": [] if usage else [{"index": 0, "delta": delta, "finish_reason": finish}],
         }
         if usage:
             ev["usage"] = usage
         if tool_trace:
             ev["ornith_tool_event"] = tool_trace
-        await resp.write(b"data: " + json.dumps(ev).encode() + b"\n\n")
+        await r.write(b"data: " + json.dumps(ev).encode() + b"\n\n")
 
     async def keepalive(coro):
+        r = await ensure_prepared()
         task = asyncio.ensure_future(coro)
         while True:
-            done, _ = await asyncio.wait({task}, timeout=10)
+            done, _ = await asyncio.wait({task}, timeout=6)
             if done:
                 return task.result()
-            await resp.write(b": working\n\n" if stream else b" ")
+            await r.write(b": working\n\n" if stream else b" ")
 
-    content, reasoning, trace, generated = [], [], [], []
+    content, reasoning, trace, generated, sandbox_snippets = [], [], [], [], []
     usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     status = 200
+    last_finish_reason = "stop"
     nudged = False
+    loop_start = time.time()
 
     async def emit(line: str):
         reasoning.append(line)
         if stream:
             await sse({"reasoning_content": "\n" + line + "\n"})
 
-    for rnd in range(8):
+    max_rounds = 4
+    for rnd in range(max_rounds):
+        elapsed = time.time() - loop_start
+        allow_tools_this_round = (rnd < max_rounds - 1) and bool(active_tools) and (elapsed < 40.0)
         payload = {**base, "messages": msgs, "stream": True, "stream_options": {"include_usage": True}}
-        if rnd < 7 and active_tools:
+        if allow_tools_this_round:
             payload["tools"] = active_tools
-        up = await req.app["session"].post(
-            target_upstream + "/v1/chat/completions",
-            json=payload,
-            timeout=aiohttp.ClientTimeout(total=None, connect=None, sock_connect=None, sock_read=None),
-        )
-        if up.status != 200:
-            status = up.status
-            msg = (await up.text())[:500]
-            up.release()
-            content.append(f"\nModel error ({status}): {msg}")
-            if stream:
-                await sse({"content": content[-1]})
+
+        try:
+            up = await req.app["session"].post(
+                target_upstream + "/v1/chat/completions",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=None, connect=10, sock_connect=10, sock_read=None),
+            )
+        except Exception:
+            if resp is None:
+                return json_err(
+                    503,
+                    "Model inference server is temporarily unreachable.",
+                    "service_unavailable",
+                    extra_headers={"Retry-After": "5", **(rl_headers or {})},
+                )
             break
 
+        if up.status != 200:
+            raw_err = await up.read()
+            up.release()
+            st_err, err_payload = parse_upstream_error(up.status, raw_err)
+            if resp is None:
+                # Never return HTTP 200 on Round 0 error! Return actual HTTP status code.
+                save_turn(st_err, None, None, None, {})
+                return web.json_response(err_payload, status=st_err, headers=hdrs)
+            status = st_err
+            break
+
+        await ensure_prepared()
         col = chatdb.StreamCollector()
         buf = b""
 
@@ -1333,6 +1984,8 @@ async def run_agent_with_server_tools(
             up.release()
 
         text, think, calls, u = col.result()
+        if col.finish_reason in ("stop", "length"):
+            last_finish_reason = col.finish_reason
         for k in usage:
             usage[k] += (u or {}).get(k) or 0
         if text:
@@ -1341,7 +1994,13 @@ async def run_agent_with_server_tools(
             reasoning.append(think)
         if not calls:
             real = [g for g in generated if g in (text or "")]
-            if "![" in (text or "") and not real and not nudged and rnd < 6 and any(t["function"]["name"] == "generate_image" for t in active_tools):
+            if (
+                "![" in (text or "")
+                and not real
+                and not nudged
+                and rnd < max_rounds - 1
+                and any(t["function"]["name"] == "generate_image" for t in active_tools)
+            ):
                 nudged = True
                 if content and content[-1] == text:
                     content.pop()
@@ -1368,6 +2027,9 @@ async def run_agent_with_server_tools(
                 args = json.loads(fn.get("arguments") or "{}")
             except Exception:
                 args = {}
+            if t_name == "run_sandbox_code" and isinstance(args.get("code"), str) and args["code"].strip():
+                lang = str(args.get("language") or "python")
+                sandbox_snippets.append((lang, args["code"].strip()))
             if stream:
                 await sse(
                     {"reasoning_content": f"\n[executing {t_name}: {json.dumps(args)[:180]}]\n"},
@@ -1385,7 +2047,18 @@ async def run_agent_with_server_tools(
             msgs.append({"role": "tool", "tool_call_id": c.get("id") or t_name, "content": result[:14000]})
             trace.append({"tool": t_name, "args": args, "result": result[:1200]})
 
+    r = await ensure_prepared()
     answer = "".join(content).strip()
+
+    # If the model executed code in `run_sandbox_code` and only narrated the outcome in `content` without
+    # including a code block, append the verified sandbox code block into `content`!
+    if sandbox_snippets and "```" not in answer:
+        last_lang, last_code = sandbox_snippets[-1]
+        code_block = f"\n\n```{last_lang}\n{last_code}\n```"
+        answer = (answer + code_block).strip()
+        if stream:
+            await sse({"content": code_block})
+
     images = [f"{server_tools.PUBLIC_BASE}/files/{g}" for g in generated]
     missing_md = [
         f"![Generated Image]({server_tools.PUBLIC_BASE}/files/{g})"
@@ -1398,25 +2071,25 @@ async def run_agent_with_server_tools(
         if stream:
             await sse({"content": extra_md, "images": images})
     if stream:
-        await sse({}, finish="stop")
+        await sse({}, finish=last_finish_reason)
         if want_usage:
             await sse({}, usage=usage)
-        await resp.write(b"data: [DONE]\n\n")
+        await r.write(b"data: [DONE]\n\n")
     else:
-        await resp.write(
+        await r.write(
             json.dumps(
                 {
                     "id": cid,
                     "object": "chat.completion",
                     "created": created,
-                    "model": target_model,
+                    "model": client_model,
                     "usage": usage,
                     "images": images,
                     "tool_trace": trace,
                     "choices": [
                         {
                             "index": 0,
-                            "finish_reason": "stop",
+                            "finish_reason": last_finish_reason,
                             "message": {
                                 "role": "assistant",
                                 "content": answer,
@@ -1428,9 +2101,9 @@ async def run_agent_with_server_tools(
                 }
             ).encode("utf-8")
         )
-    await resp.write_eof()
+    await r.write_eof()
     save_turn(status, answer, "\n".join(reasoning) or None, trace or None, usage)
-    return resp
+    return r
 
 
 async def app_ctx(app: web.Application):
