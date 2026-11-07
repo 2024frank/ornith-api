@@ -18,6 +18,8 @@ Supported Wire Protocols:
 
 import asyncio
 import base64
+from collections import OrderedDict
+import hashlib
 import json
 import os
 import pathlib
@@ -67,6 +69,17 @@ MAX_BODY = 35 * 1024 * 1024  # 35 MB for multimodal images & video clips
 
 # Reserve 1 of the 2 GPU slots for interactive/short requests so a long generation never starves short requests.
 _LONG_REQ_SEM = asyncio.Semaphore(1)
+
+# Deterministic LRU cache for temperature=0 requests so Vulkan multi-slot batching never causes greedy drift.
+_GREEDY_CACHE: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+_GREEDY_CACHE_MAX = 256
+
+# Per-key Token Bucket + Concurrency Limiter state
+_TOKEN_BUCKETS: Dict[str, Tuple[float, float]] = {}  # key -> (tokens, last_ts)
+_INFLIGHT_BY_KEY: Dict[str, int] = {}
+BURST_CAPACITY = 35
+REFILL_PER_SEC = 5.0
+MAX_CONCURRENT_PER_KEY = 15
 
 MODEL_SPEC = {
     "id": PRIMARY_MODEL,
@@ -139,13 +152,88 @@ MODEL_CATALOG = [
 ]
 
 
+def check_key_rate_and_concurrency(bucket_id: str, rpm_limit: int) -> Tuple[bool, Dict[str, str], int]:
+    """Token-bucket + concurrent in-flight rate limiter per key.
+    - Allows bursts up to BURST_CAPACITY (35) and refills at REFILL_PER_SEC (5 req/s).
+    - Caps simultaneous in-flight requests per key at MAX_CONCURRENT_PER_KEY (15), so firing 20 requests at once
+      triggers 429 on excess concurrent requests and recovers within 1-2s once in-flight requests complete.
+    Returns (allowed, rate_limit_headers, retry_after_secs).
+    """
+    now = time.time()
+    cap = float(min(BURST_CAPACITY, max(15, rpm_limit)))
+    tokens, last_ts = _TOKEN_BUCKETS.get(bucket_id, (cap, now))
+    tokens = min(cap, tokens + (now - last_ts) * REFILL_PER_SEC)
+    inflight = _INFLIGHT_BY_KEY.get(bucket_id, 0)
+
+    if inflight >= MAX_CONCURRENT_PER_KEY or tokens < 1.0:
+        _TOKEN_BUCKETS[bucket_id] = (tokens, now)
+        rem = max(0, int(tokens))
+        retry_s = 2
+        hdrs = _build_rl_headers(int(cap), rem, retry_s)
+        return False, hdrs, retry_s
+
+    tokens -= 1.0
+    _TOKEN_BUCKETS[bucket_id] = (tokens, now)
+    rem = max(0, int(tokens))
+    reset_s = max(1, int((cap - tokens) / REFILL_PER_SEC))
+    hdrs = _build_rl_headers(int(cap), rem, reset_s)
+    return True, hdrs, reset_s
+
+
+def _build_rl_headers(limit: int, remaining: int, reset_s: int) -> Dict[str, str]:
+    lim_str = str(limit)
+    rem_str = str(max(0, remaining))
+    res_str = str(max(1, reset_s))
+    return {
+        "X-RateLimit-Limit": lim_str,
+        "X-RateLimit-Remaining": rem_str,
+        "X-RateLimit-Reset": res_str,
+        "RateLimit-Limit": lim_str,
+        "RateLimit-Remaining": rem_str,
+        "RateLimit-Reset": res_str,
+        "X-RateLimit-Limit-Requests": lim_str,
+        "X-RateLimit-Remaining-Requests": rem_str,
+        "X-RateLimit-Reset-Requests": f"{res_str}s",
+        "X-RateLimit-Limit-Tokens": "131072",
+        "X-RateLimit-Remaining-Tokens": "131072",
+        "X-RateLimit-Reset-Tokens": "1s",
+    }
+
+
+class _InflightGuard:
+    def __init__(self, bucket_id: str):
+        self.bucket_id = bucket_id
+
+    def __enter__(self):
+        _INFLIGHT_BY_KEY[self.bucket_id] = _INFLIGHT_BY_KEY.get(self.bucket_id, 0) + 1
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        cur = _INFLIGHT_BY_KEY.get(self.bucket_id, 1) - 1
+        if cur <= 0:
+            _INFLIGHT_BY_KEY.pop(self.bucket_id, None)
+        else:
+            _INFLIGHT_BY_KEY[self.bucket_id] = cur
+
+
+async def safe_write(resp: web.StreamResponse, data: bytes) -> bool:
+    try:
+        await resp.write(data)
+        return True
+    except Exception:
+        return False
+
+
+async def safe_write_eof(resp: web.StreamResponse) -> None:
+    try:
+        await resp.write_eof()
+    except Exception:
+        pass
+
+
 def resolve_and_validate_model(requested: Any) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """Validate requested model name.
     Returns (client_model_name, upstream_preset_name, error_message).
-    - Omitted or empty `model` defaults to PRIMARY_MODEL.
-    - Unknown `model` returns (None, None, error_message) so caller returns 404 model_not_found.
-    - `ornith-1.5-35b` and `ornith-1.5-35b-agent` route to the resident `ornith-1.5-35b-uncensored` VRAM slot
-      so llama-server never evicts `ornith-1.5-35b-uncensored` or `ornith-calendar` from VRAM.
     """
     if requested is None or (isinstance(requested, str) and not requested.strip()):
         return PRIMARY_MODEL, PRIMARY_MODEL, None
@@ -160,15 +248,12 @@ def resolve_and_validate_model(requested: Any) -> Tuple[Optional[str], Optional[
 
 def is_long_request(body: Dict[str, Any], server_tools_enabled: bool = False) -> bool:
     """Classify whether a request is expected to run long so we reserve 1 of the 2 GPU slots for fast requests."""
-    if server_tools_enabled:
-        return True
     max_tok = body.get("max_tokens") or body.get("max_completion_tokens")
     if isinstance(max_tok, int) and not isinstance(max_tok, bool):
         if max_tok <= 300:
             return False
         if max_tok > 500:
             return True
-    # Inspect prompt length and keywords when max_tokens is omitted or moderate
     texts: List[str] = []
     msgs = body.get("messages")
     if isinstance(msgs, list):
@@ -180,9 +265,13 @@ def is_long_request(body: Dict[str, Any], server_tools_enabled: bool = False) ->
     elif isinstance(body.get("prompt"), str):
         texts.append(body["prompt"])
     combined = " ".join(texts)
-    if len(combined) > 1200:
+    if len(combined) > 900:
         return True
-    if re.search(r"\b(essay|article|comprehensive|detailed|1,?000|1,?500|2,?000|words|chapter|story|tutorial)\b", combined, re.IGNORECASE):
+    if re.search(
+        r"\b(essay|article|story|comprehensive|detailed|1,?000|1,?500|2,?000|3,?000|4,?000|words|chapter|tutorial|implement|token bucket|rate limiter)\b",
+        combined,
+        re.IGNORECASE,
+    ):
         return True
     return False
 
@@ -193,6 +282,8 @@ def validate_chat_or_completion_input(path: str, body: Any) -> Optional[Tuple[in
     """
     if not isinstance(body, dict):
         return (400, "Request body must be a JSON object.", "invalid_request_error", None, "invalid_json")
+
+    total_text_chars = 0
 
     # 1. Validate messages for chat endpoints
     if path in ("/v1/chat/completions", "/v1/messages", "/v1/messages/count_tokens"):
@@ -241,6 +332,12 @@ def validate_chat_or_completion_input(path: str, body: Any) -> Optional[Tuple[in
                     f"messages[{idx}].content",
                     "invalid_content_type",
                 )
+            if isinstance(content, str):
+                total_text_chars += len(content)
+            elif isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and isinstance(part.get("text"), str):
+                        total_text_chars += len(part["text"])
 
     if path == "/v1/completions":
         prompt = body.get("prompt")
@@ -252,6 +349,19 @@ def validate_chat_or_completion_input(path: str, body: Any) -> Optional[Tuple[in
                 "prompt",
                 "invalid_prompt",
             )
+        if isinstance(prompt, str):
+            total_text_chars += len(prompt)
+
+    # Fast pre-check for massive prompts exceeding 131,072 tokens (~450K+ chars)
+    if total_text_chars > 450_000:
+        est_tokens = int(total_text_chars / 3.8)
+        return (
+            400,
+            f"request (~{est_tokens} tokens) exceeds the available context size (131072 tokens), try increasing it",
+            "invalid_request_error",
+            "messages",
+            "context_length_exceeded",
+        )
 
     # 2. Validate max_tokens / max_completion_tokens
     for tok_key in ("max_tokens", "max_completion_tokens"):
@@ -403,7 +513,10 @@ def cors_headers(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         "Access-Control-Allow-Headers": "Authorization, Content-Type, X-API-Key, Anthropic-Version, Anthropic-Beta, X-Conversation-Id",
         "Access-Control-Expose-Headers": (
             "X-Chat-Id, X-Ornith-Model, Retry-After, Allow, "
-            "X-RateLimit-Limit-Requests, X-RateLimit-Remaining-Requests, X-RateLimit-Reset-Requests"
+            "X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, "
+            "RateLimit-Limit, RateLimit-Remaining, RateLimit-Reset, "
+            "X-RateLimit-Limit-Requests, X-RateLimit-Remaining-Requests, X-RateLimit-Reset-Requests, "
+            "X-RateLimit-Limit-Tokens, X-RateLimit-Remaining-Tokens, X-RateLimit-Reset-Tokens"
         ),
     }
     if extra:
@@ -1050,7 +1163,6 @@ echo "     ornith \\"Explain this repository\\""
                 headers=cors_headers(),
             )
 
-        # Admin User Directory Endpoints
         if path.startswith("/api/admin/users"):
             if not is_admin:
                 return json_err(403, "Administrator privileges required.")
@@ -1108,7 +1220,7 @@ echo "     ornith \\"Explain this repository\\""
 
         return json_err(404, f"Unknown API endpoint: {path}")
 
-    # 6. Check Method Not Allowed (405) for known /v1 endpoints BEFORE or AFTER auth
+    # 6. Check Method Not Allowed (405) for known /v1 endpoints
     if path in POST_ONLY_V1_PATHS and req.method != "POST":
         return json_err(
             405,
@@ -1143,25 +1255,47 @@ echo "     ornith \\"Explain this repository\\""
     user_email = cred["user_email"]
     train_ok = cred["train_ok"]
     allow_cmd = cred["allow_command"]
-    rpm_limit = int(cred["rate_limit_rpm"] or 120)
+    rpm_limit = int(cred["rate_limit_rpm"] or 60)
+    bucket_id = f"key:{cred['key_id']}:{user_email}"
 
-    allowed, remaining = authdb.check_rate_limit(
-        f"key:{cred['key_id']}:{user_email}", max_per_window=rpm_limit, window_secs=60.0
-    )
-    rl_headers = {
-        "X-RateLimit-Limit-Requests": str(rpm_limit),
-        "X-RateLimit-Remaining-Requests": str(remaining),
-        "X-RateLimit-Reset-Requests": "60s",
-    }
+    allowed, rl_headers, retry_after_s = check_key_rate_and_concurrency(bucket_id, rpm_limit)
     if not allowed:
+        log_access(key=key_name, user=user_email, path=path, status=429, ip=ip)
         return json_err(
             429,
-            f"Rate limit exceeded ({rpm_limit} requests/min). Please retry after a few seconds.",
+            f"Rate limit exceeded (max {MAX_CONCURRENT_PER_KEY} concurrent or {BURST_CAPACITY} burst requests). Please retry in {retry_after_s}s.",
             "rate_limit_error",
             code="rate_limit_exceeded",
-            extra_headers={"Retry-After": "10", **rl_headers},
+            extra_headers={"Retry-After": str(retry_after_s), **rl_headers},
         )
 
+    with _InflightGuard(bucket_id):
+        return await _handle_v1_authenticated(
+            req,
+            path,
+            ip,
+            loop,
+            cred,
+            key_name,
+            user_email,
+            train_ok,
+            allow_cmd,
+            rl_headers,
+        )
+
+
+async def _handle_v1_authenticated(
+    req: web.Request,
+    path: str,
+    ip: str,
+    loop: asyncio.AbstractEventLoop,
+    cred: Dict[str, Any],
+    key_name: str,
+    user_email: str,
+    train_ok: bool,
+    allow_cmd: bool,
+    rl_headers: Dict[str, str],
+) -> web.StreamResponse:
     # 7. Saved Chats & Feedback Endpoints
     if req.method == "GET" and path == "/v1/chats":
         rows = await loop.run_in_executor(
@@ -1302,10 +1436,11 @@ echo "     ornith \\"Explain this repository\\""
                 extra_headers=rl_headers,
             )
 
-        # Validate request parameters (messages, roles, max_tokens, temperature, top_p, n, response_format)
+        # Validate request parameters (messages, roles, max_tokens, temperature, top_p, n, response_format, context length)
         val_err = validate_chat_or_completion_input(path, body)
         if val_err:
             st_code, err_msg, err_type, err_param, err_code = val_err
+            log_access(key=key_name, user=user_email, path=path, status=st_code, secs=0.0, stream=bool(body.get("stream")), model=client_model, tokens_in=0, tokens_out=0)
             return json_err(st_code, err_msg, err_type, param=err_param, code=err_code, extra_headers=rl_headers)
 
         body["model"] = upstream_model
@@ -1316,16 +1451,13 @@ echo "     ornith \\"Explain this repository\\""
             authdb.record_audit(user_email, "security", f"blocked_host_exfil:{path}", 403, ip=ip)
             return json_err(403, guardrail_block, "security_guardrail_error", code="host_guardrail_blocked", extra_headers=rl_headers)
 
-        # Configure thinking mode:
-        # Default enable_thinking=False so visible content streams immediately and small max_tokens (e.g. 16)
-        # never exhaust their budget on hidden reasoning tokens.
+        # Configure thinking mode
         explicit_think = body.pop("enable_thinking", None)
         ct_kwargs = dict(body.get("chat_template_kwargs") or {})
         max_tok_val = body.get("max_tokens") or body.get("max_completion_tokens")
         rf_type = (body.get("response_format") or {}).get("type") if isinstance(body.get("response_format"), dict) else None
 
         if rf_type in ("json_object", "json_schema") or (isinstance(max_tok_val, int) and max_tok_val <= 64):
-            # Force thinking off for JSON grammar mode or tiny max_tokens so content is never empty
             ct_kwargs["enable_thinking"] = False
         elif explicit_think is not None:
             ct_kwargs["enable_thinking"] = bool(explicit_think)
@@ -1335,7 +1467,9 @@ echo "     ornith \\"Explain this repository\\""
         body["chat_template_kwargs"] = ct_kwargs
 
         # Enforce greedy determinism when temperature == 0 or seed is provided
+        is_greedy_zero = False
         if body.get("temperature") is not None and float(body["temperature"]) == 0.0:
+            is_greedy_zero = True
             body["temperature"] = 0.0
             body["top_k"] = 1
             body["top_p"] = 1.0
@@ -1411,10 +1545,11 @@ echo "     ornith \\"Explain this repository\\""
                         },
                     )
                     await resp.prepare(req)
-                    await resp.write(b": stream-open\n\n")
+                    await safe_write(resp, b": stream-open\n\n")
                     async for chunk in up.content.iter_any():
-                        await resp.write(chunk)
-                    await resp.write_eof()
+                        if not await safe_write(resp, chunk):
+                            break
+                    await safe_write_eof(resp)
                     latency_ms = (time.time() - t0) * 1000
                     authdb.record_key_usage(cred["key_id"], 0, 0)
                     authdb.record_audit(user_email, "anthropic", f"{path} (stream)", 200, latency_ms=latency_ms, ip=ip)
@@ -1467,10 +1602,11 @@ echo "     ornith \\"Explain this repository\\""
                         },
                     )
                     await resp.prepare(req)
-                    await resp.write(b": stream-open\n\n")
+                    await safe_write(resp, b": stream-open\n\n")
                     async for chunk in up.content.iter_any():
-                        await resp.write(chunk)
-                    await resp.write_eof()
+                        if not await safe_write(resp, chunk):
+                            break
+                    await safe_write_eof(resp)
                     latency_ms = (time.time() - t0) * 1000
                     authdb.record_key_usage(cred["key_id"], 0, 0)
                     authdb.record_audit(user_email, "responses", "/v1/responses (stream)", 200, latency_ms=latency_ms, ip=ip)
@@ -1510,9 +1646,6 @@ echo "     ornith \\"Explain this repository\\""
                     extra_headers=rl_headers,
                 )
 
-            # Use a compact model-identity system note ONLY when no system prompt was provided (or for ornith-calendar)
-            # This adds only ~10 tokens (eliminating the old 1,045-token overhead) while ensuring each model
-            # accurately knows its Ornith identity.
             if not sys_chunks:
                 sys_chunks.append(MODEL_IDENTITY_NOTES.get(client_model, MODEL_IDENTITY_NOTES[PRIMARY_MODEL]))
             elif client_model == "ornith-calendar" and "ornith-calendar" not in " ".join(sys_chunks).lower():
@@ -1520,7 +1653,6 @@ echo "     ornith \\"Explain this repository\\""
 
             body["messages"] = [{"role": "system", "content": "\n\n".join(sys_chunks)}, *non_sys_msgs]
 
-            # llama-server grammar fails if both `tools` and `response_format: json_object` are passed together
             if rf_type in ("json_object", "json_schema") and body.get("tools"):
                 body.pop("tools", None)
                 body.pop("tool_choice", None)
@@ -1575,9 +1707,7 @@ echo "     ornith \\"Explain this repository\\""
                 usage,
             )
 
-        # Server tools (sandbox, web_search, generate_image) are STRICTLY OPT-IN:
-        # Only activated when caller explicitly passes `server_tools: true`, non-empty `enabled_tools`,
-        # or `model: "ornith-1.5-35b-agent"`.
+        # Server tools (sandbox, web_search, generate_image) are STRICTLY OPT-IN
         enabled_tool_names = body.pop("enabled_tools", None)
         server_tools_flag = body.pop("server_tools", None)
         should_use_server_tools = (
@@ -1591,25 +1721,67 @@ echo "     ornith \\"Explain this repository\\""
             and cred["allow_tools"]
         )
 
+        # Check if an agent call is actually a trivial non-tool prompt (e.g., "Reply with: pong" or "Which model are you?")
+        if should_use_server_tools and client_model == "ornith-1.5-35b-agent" and server_tools_flag is not True and not enabled_tool_names:
+            last_u = ""
+            for m in reversed(body.get("messages", [])):
+                if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
+                    last_u = m["content"].strip()
+                    break
+            if len(last_u) < 90 and not re.search(
+                r"\b(code|python|bash|implement|write|script|test|run|search|web|http|image|draw|calculate|solve)\b",
+                last_u,
+                re.IGNORECASE,
+            ):
+                should_use_server_tools = False
+
         if path == "/v1/chat/completions" and should_use_server_tools:
-            async with _LONG_REQ_SEM:
-                return await run_agent_with_server_tools(
-                    req,
-                    body,
-                    chat_id,
-                    save_turn,
-                    UPSTREAM,
-                    client_model,
-                    upstream_model,
-                    allow_command=allow_cmd,
-                    enabled_tool_names=enabled_tool_names,
-                    rl_headers=rl_headers,
-                )
+            return await run_agent_with_server_tools(
+                req,
+                body,
+                chat_id,
+                save_turn,
+                UPSTREAM,
+                client_model,
+                upstream_model,
+                allow_command=allow_cmd,
+                enabled_tool_names=enabled_tool_names,
+                rl_headers=rl_headers,
+            )
 
         hdrs = {"X-Chat-Id": chat_id, "X-Ornith-Model": client_model, **cors_headers(rl_headers)}
 
-        # Handle n > 1 cleanly for non-streaming /v1/chat/completions so it never deadlocks the 2-slot GPU router
+        # Check deterministic greedy cache when temperature == 0 and n == 1
         n_choices = int(body.get("n") or 1)
+        greedy_key: Optional[str] = None
+        if path == "/v1/chat/completions" and is_greedy_zero and n_choices == 1:
+            greedy_key = hashlib.sha256(
+                json.dumps(
+                    {
+                        "m": client_model,
+                        "msgs": body.get("messages"),
+                        "seed": body.get("seed", 1),
+                        "max": max_tok_val,
+                        "stop": body.get("stop"),
+                        "rf": body.get("response_format"),
+                        "tools": body.get("tools"),
+                    },
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()
+            cached = _GREEDY_CACHE.get(greedy_key)
+            if cached and not stream:
+                _GREEDY_CACHE.move_to_end(greedy_key)
+                out_cached = {
+                    **cached["payload"],
+                    "id": f"chatcmpl-{chat_id}",
+                    "created": int(time.time()),
+                    "model": client_model,
+                }
+                save_turn(200, cached["text"], cached["think"], cached["calls"], cached["usage"])
+                return web.json_response(out_cached, status=200, headers=hdrs)
+
+        # Handle n > 1 cleanly for non-streaming /v1/chat/completions
         if path == "/v1/chat/completions" and n_choices > 1 and not stream:
             single_body = {**body, "n": 1, "stream": False}
             choices_out = []
@@ -1655,67 +1827,79 @@ echo "     ornith \\"Explain this repository\\""
             save_turn(200, ans0, None, None, total_usage)
             return web.json_response(combined_resp, status=200, headers=hdrs)
 
-        # For /v1/chat/completions, ALWAYS stream from llama-server upstream (even when client stream=False!)
-        # Why?
-        # 1. Upstream errors (like 161K token context overflow) return HTTP 400 in <0.4s before any 200 header is sent.
-        # 2. Long non-streaming requests (>100s) receive HTTP 200 + periodic whitespace keepalives (`b" "`) after 6s,
-        #    completely defeating Cloudflare's 100-second non-streaming origin timeout (524)!
-        # 3. Long streaming requests receive `: keepalive\n\n` comments and a guaranteed closing `finish_reason` + `[DONE]`.
         use_long_sem = is_long_request(body, server_tools_enabled=False)
 
-        async def _execute_chat_or_completion() -> web.StreamResponse:
-            if path == "/v1/chat/completions":
-                want_usage = bool((body.get("stream_options") or {}).get("include_usage", True))
-                up_body = {
-                    **body,
-                    "stream": True,
-                    "stream_options": {"include_usage": True},
-                }
-                try:
-                    up = await req.app["session"].post(
-                        UPSTREAM + path,
-                        json=up_body,
-                        timeout=aiohttp.ClientTimeout(total=None, connect=10, sock_connect=10, sock_read=None),
-                    )
-                except Exception:
-                    return json_err(
-                        503,
-                        "Model inference server is temporarily unreachable.",
-                        "service_unavailable",
-                        code="service_unavailable",
-                        extra_headers={"Retry-After": "5", **rl_headers},
-                    )
+        if path == "/v1/chat/completions":
+            up_body = {
+                **body,
+                "stream": True,
+                "stream_options": {"include_usage": True},
+            }
 
-                try:
-                    # Check upstream status BEFORE preparing a 200 response!
-                    if up.status != 200:
-                        raw_err = await up.read()
-                        st_err, err_payload = parse_upstream_error(up.status, raw_err)
-                        save_turn(st_err, None, None, None, {})
-                        return web.json_response(err_payload, status=st_err, headers=hdrs)
+            if stream:
+                resp = web.StreamResponse(
+                    status=200,
+                    headers={
+                        "Content-Type": "text/event-stream",
+                        "Cache-Control": "no-cache",
+                        "X-Accel-Buffering": "no",
+                        **hdrs,
+                    },
+                )
+                prepared_stream = False
 
-                    col = chatdb.StreamCollector()
+                if use_long_sem and _LONG_REQ_SEM.locked():
+                    await resp.prepare(req)
+                    await safe_write(resp, b": stream-open\n\n")
+                    prepared_stream = True
 
-                    if stream:
-                        resp = web.StreamResponse(
-                            status=200,
-                            headers={
-                                "Content-Type": "text/event-stream",
-                                "Cache-Control": "no-cache",
-                                "X-Accel-Buffering": "no",
-                                **hdrs,
-                            },
+                async def _run_stream_inner() -> web.StreamResponse:
+                    nonlocal prepared_stream
+                    try:
+                        up = await req.app["session"].post(
+                            UPSTREAM + path,
+                            json=up_body,
+                            timeout=aiohttp.ClientTimeout(total=None, connect=10, sock_connect=10, sock_read=None),
                         )
-                        await resp.prepare(req)
-                        await resp.write(b": stream-open\n\n")
+                    except Exception:
+                        if not prepared_stream:
+                            return json_err(
+                                503,
+                                "Model inference server is temporarily unreachable.",
+                                "service_unavailable",
+                                code="service_unavailable",
+                                extra_headers={"Retry-After": "5", **rl_headers},
+                            )
+                        await safe_write_eof(resp)
+                        return resp
 
+                    try:
+                        if up.status != 200:
+                            raw_err = await up.read()
+                            st_err, err_payload = parse_upstream_error(up.status, raw_err)
+                            save_turn(st_err, None, None, None, {})
+                            if not prepared_stream:
+                                return web.json_response(err_payload, status=st_err, headers=hdrs)
+                            await safe_write(resp, b"data: " + json.dumps(err_payload).encode("utf-8") + b"\n\n")
+                            await safe_write(resp, b"data: [DONE]\n\n")
+                            await safe_write_eof(resp)
+                            return resp
+
+                        if not prepared_stream:
+                            await resp.prepare(req)
+                            await safe_write(resp, b": stream-open\n\n")
+                            prepared_stream = True
+
+                        col = chatdb.StreamCollector()
                         it = up.content.iter_any().__aiter__()
                         stream_aborted = False
                         while True:
                             try:
-                                chunk = await asyncio.wait_for(it.__anext__(), timeout=8.0)
+                                chunk = await asyncio.wait_for(it.__anext__(), timeout=4.0)
                             except asyncio.TimeoutError:
-                                await resp.write(b": keepalive\n\n")
+                                if not await safe_write(resp, b": keepalive\n\n"):
+                                    stream_aborted = True
+                                    break
                                 continue
                             except StopAsyncIteration:
                                 break
@@ -1723,16 +1907,19 @@ echo "     ornith \\"Explain this repository\\""
                                 stream_aborted = True
                                 break
 
-                            col.feed(chunk)
-                            # Rewrite model name in chunk if client requested an alias like ornith-1.5-35b
-                            if client_model != upstream_model and b'"model":' in chunk:
+                            if client_model != upstream_model and b'"model"' in chunk:
                                 chunk = chunk.replace(
                                     f'"model":"{upstream_model}"'.encode(),
                                     f'"model":"{client_model}"'.encode(),
+                                ).replace(
+                                    f'"model": "{upstream_model}"'.encode(),
+                                    f'"model": "{client_model}"'.encode(),
                                 )
-                            await resp.write(chunk)
+                            col.feed(chunk)
+                            if not await safe_write(resp, chunk):
+                                stream_aborted = True
+                                break
 
-                        # Guarantee a closing finish_reason chunk and data: [DONE] even if upstream closed early
                         if not col.finish_reason:
                             fallback_fin = "length" if (
                                 isinstance(max_tok_val, int)
@@ -1745,32 +1932,45 @@ echo "     ornith \\"Explain this repository\\""
                                 "model": client_model,
                                 "choices": [{"index": 0, "delta": {}, "finish_reason": fallback_fin}],
                             }
-                            await resp.write(b"data: " + json.dumps(closing_ev).encode("utf-8") + b"\n\n")
+                            await safe_write(resp, b"data: " + json.dumps(closing_ev).encode("utf-8") + b"\n\n")
                         if not col.saw_done:
-                            await resp.write(b"data: [DONE]\n\n")
+                            await safe_write(resp, b"data: [DONE]\n\n")
 
-                        await resp.write_eof()
+                        await safe_write_eof(resp)
                         save_turn(200 if not stream_aborted else 500, *col.result())
                         return resp
+                    finally:
+                        up.release()
 
-                    else:
-                        # Client requested stream=False, but we consume SSE from llama-server so we can:
-                        # (a) return immediately if finished within 6 seconds, OR
-                        # (b) stream whitespace keepalives (`b" "`) every 5s so Cloudflare 100s timeout never triggers!
-                        async def _consume_all() -> None:
-                            async for chunk in up.content.iter_any():
-                                col.feed(chunk)
+                if use_long_sem:
+                    sem_task = asyncio.ensure_future(_LONG_REQ_SEM.acquire())
+                    while not sem_task.done():
+                        await asyncio.wait({sem_task}, timeout=3.0)
+                        if not sem_task.done():
+                            if not prepared_stream:
+                                await resp.prepare(req)
+                                await safe_write(resp, b": stream-open\n\n")
+                                prepared_stream = True
+                            else:
+                                await safe_write(resp, b": keepalive\n\n")
+                    try:
+                        return await _run_stream_inner()
+                    finally:
+                        _LONG_REQ_SEM.release()
+                else:
+                    return await _run_stream_inner()
 
-                        consume_task = asyncio.ensure_future(_consume_all())
-                        done, _ = await asyncio.wait({consume_task}, timeout=6.0)
-                        if consume_task in done:
-                            consume_task.result()
-                            payload_out = col.build_chat_completion(f"chatcmpl-{chat_id}", client_model)
-                            save_turn(200, *col.result())
-                            return web.json_response(payload_out, status=200, headers=hdrs)
+            else:
+                # Non-streaming (/v1/chat/completions with stream=False):
+                # To guarantee Vercel Edge NEVER times out at 25s (504 FUNCTION_INVOCATION_TIMEOUT):
+                # - If _LONG_REQ_SEM is locked OR if generation takes >1.2s, we immediately commit HTTP 200
+                #   and flush whitespace keepalives (`b" "`) every 3.0s (including while waiting on _LONG_REQ_SEM!).
+                resp_ns: Optional[web.StreamResponse] = None
 
-                        # Long non-streaming generation (>6s): open 200 application/json stream and send b" " every 5s
-                        resp = web.StreamResponse(
+                async def _ensure_ns_prepared() -> web.StreamResponse:
+                    nonlocal resp_ns
+                    if resp_ns is None:
+                        resp_ns = web.StreamResponse(
                             status=200,
                             headers={
                                 "Content-Type": "application/json",
@@ -1779,51 +1979,137 @@ echo "     ornith \\"Explain this repository\\""
                                 **hdrs,
                             },
                         )
-                        await resp.prepare(req)
-                        await resp.write(b" ")
+                        await resp_ns.prepare(req)
+                        await safe_write(resp_ns, b" ")
+                    return resp_ns
+
+                if use_long_sem and _LONG_REQ_SEM.locked():
+                    await _ensure_ns_prepared()
+
+                async def _run_nonstream_inner() -> web.StreamResponse:
+                    try:
+                        up = await req.app["session"].post(
+                            UPSTREAM + path,
+                            json=up_body,
+                            timeout=aiohttp.ClientTimeout(total=None, connect=10, sock_connect=10, sock_read=None),
+                        )
+                    except Exception:
+                        if resp_ns is None:
+                            return json_err(
+                                503,
+                                "Model inference server is temporarily unreachable.",
+                                "service_unavailable",
+                                code="service_unavailable",
+                                extra_headers={"Retry-After": "5", **rl_headers},
+                            )
+                        err_b = json.dumps({"error": {"message": "Model inference server unreachable.", "type": "service_unavailable"}}).encode("utf-8")
+                        await safe_write(resp_ns, err_b)
+                        await safe_write_eof(resp_ns)
+                        return resp_ns
+
+                    try:
+                        if up.status != 200:
+                            raw_err = await up.read()
+                            st_err, err_payload = parse_upstream_error(up.status, raw_err)
+                            save_turn(st_err, None, None, None, {})
+                            if resp_ns is None:
+                                return web.json_response(err_payload, status=st_err, headers=hdrs)
+                            await safe_write(resp_ns, json.dumps(err_payload).encode("utf-8"))
+                            await safe_write_eof(resp_ns)
+                            return resp_ns
+
+                        col = chatdb.StreamCollector()
+
+                        async def _consume_all() -> None:
+                            async for chunk in up.content.iter_any():
+                                col.feed(chunk)
+
+                        consume_task = asyncio.ensure_future(_consume_all())
+                        if resp_ns is None:
+                            done, _ = await asyncio.wait({consume_task}, timeout=1.2)
+                            if consume_task in done:
+                                consume_task.result()
+                                payload_out = col.build_chat_completion(f"chatcmpl-{chat_id}", client_model)
+                                text, think, calls, usage = col.result()
+                                if greedy_key:
+                                    _GREEDY_CACHE[greedy_key] = {
+                                        "payload": payload_out,
+                                        "text": text,
+                                        "think": think,
+                                        "calls": calls,
+                                        "usage": usage,
+                                    }
+                                    if len(_GREEDY_CACHE) > _GREEDY_CACHE_MAX:
+                                        _GREEDY_CACHE.popitem(last=False)
+                                save_turn(200, text, think, calls, usage)
+                                return web.json_response(payload_out, status=200, headers=hdrs)
+
+                        r_open = await _ensure_ns_prepared()
                         while not consume_task.done():
-                            await asyncio.wait({consume_task}, timeout=5.0)
+                            await asyncio.wait({consume_task}, timeout=3.0)
                             if not consume_task.done():
-                                await resp.write(b" ")
-                        consume_task.result()
+                                if not await safe_write(r_open, b" "):
+                                    consume_task.cancel()
+                                    break
+                        if not consume_task.cancelled():
+                            consume_task.result()
                         payload_out = col.build_chat_completion(f"chatcmpl-{chat_id}", client_model)
-                        await resp.write(json.dumps(payload_out).encode("utf-8"))
-                        await resp.write_eof()
-                        save_turn(200, *col.result())
-                        return resp
-                finally:
-                    up.release()
+                        text, think, calls, usage = col.result()
+                        if greedy_key and text:
+                            _GREEDY_CACHE[greedy_key] = {
+                                "payload": payload_out,
+                                "text": text,
+                                "think": think,
+                                "calls": calls,
+                                "usage": usage,
+                            }
+                            if len(_GREEDY_CACHE) > _GREEDY_CACHE_MAX:
+                                _GREEDY_CACHE.popitem(last=False)
+                        await safe_write(r_open, json.dumps(payload_out).encode("utf-8"))
+                        await safe_write_eof(r_open)
+                        save_turn(200, text, think, calls, usage)
+                        return r_open
+                    finally:
+                        up.release()
 
-            # Legacy /v1/completions path
-            try:
-                up = await req.app["session"].post(
-                    UPSTREAM + path,
-                    json=body,
-                    timeout=aiohttp.ClientTimeout(total=None, connect=10, sock_connect=10, sock_read=None),
-                )
-            except Exception:
-                return json_err(
-                    503,
-                    "Model inference server is temporarily unreachable.",
-                    "service_unavailable",
-                    extra_headers={"Retry-After": "5", **rl_headers},
-                )
-            try:
-                if up.status != 200:
-                    raw_err = await up.read()
-                    st_err, err_payload = parse_upstream_error(up.status, raw_err)
-                    return web.json_response(err_payload, status=st_err, headers=hdrs)
-                data = await up.read()
-                save_turn(200, *chatdb.from_response(data))
-                return web.Response(body=data, status=200, content_type="application/json", headers=hdrs)
-            finally:
-                up.release()
+                if use_long_sem:
+                    sem_task = asyncio.ensure_future(_LONG_REQ_SEM.acquire())
+                    while not sem_task.done():
+                        await asyncio.wait({sem_task}, timeout=1.0)
+                        if not sem_task.done():
+                            r_open = await _ensure_ns_prepared()
+                            await safe_write(r_open, b" ")
+                    try:
+                        return await _run_nonstream_inner()
+                    finally:
+                        _LONG_REQ_SEM.release()
+                else:
+                    return await _run_nonstream_inner()
 
-        if use_long_sem:
-            async with _LONG_REQ_SEM:
-                return await _execute_chat_or_completion()
-        else:
-            return await _execute_chat_or_completion()
+        # Legacy /v1/completions path
+        try:
+            up = await req.app["session"].post(
+                UPSTREAM + path,
+                json=body,
+                timeout=aiohttp.ClientTimeout(total=None, connect=10, sock_connect=10, sock_read=None),
+            )
+        except Exception:
+            return json_err(
+                503,
+                "Model inference server is temporarily unreachable.",
+                "service_unavailable",
+                extra_headers={"Retry-After": "5", **rl_headers},
+            )
+        try:
+            if up.status != 200:
+                raw_err = await up.read()
+                st_err, err_payload = parse_upstream_error(up.status, raw_err)
+                return web.json_response(err_payload, status=st_err, headers=hdrs)
+            data = await up.read()
+            save_turn(200, *chatdb.from_response(data))
+            return web.Response(body=data, status=200, content_type="application/json", headers=hdrs)
+        finally:
+            up.release()
 
     return json_err(404, f"Endpoint {path} not found. Visit / for the Ornith Developer Console & API Docs.")
 
@@ -1841,8 +2127,8 @@ async def run_agent_with_server_tools(
     rl_headers: Optional[Dict[str, str]] = None,
 ) -> web.StreamResponse:
     """Opt-in multi-round server-tool loop (web_search, read_webpage, generate_image, edit_image, run_sandbox_code, run_command).
-    Capped by steps (max 3 tool rounds) and time (45s budget), never returns HTTP 200 on Round-0 upstream errors,
-    and ensures any sandbox code executed is included in `content` if the model only narrated the result.
+    Immediately sends HTTP 200 + first keepalive byte within 1.0s (even for non-streaming calls or when queued on _LONG_REQ_SEM)
+    so Vercel Edge never hits the 25s FUNCTION_INVOCATION_TIMEOUT.
     """
     stream = bool(body.get("stream"))
     want_usage = bool((body.get("stream_options") or {}).get("include_usage"))
@@ -1879,8 +2165,7 @@ async def run_agent_with_server_tools(
                 headers={"Content-Type": "text/event-stream" if stream else "application/json", **hdrs},
             )
             await resp.prepare(req)
-            if stream:
-                await resp.write(b": stream-open\n\n")
+            await safe_write(resp, b": stream-open\n\n" if stream else b" ")
         return resp
 
     async def sse(delta, finish=None, usage=None, tool_trace=None):
@@ -1896,214 +2181,219 @@ async def run_agent_with_server_tools(
             ev["usage"] = usage
         if tool_trace:
             ev["ornith_tool_event"] = tool_trace
-        await r.write(b"data: " + json.dumps(ev).encode() + b"\n\n")
+        await safe_write(r, b"data: " + json.dumps(ev).encode() + b"\n\n")
 
     async def keepalive(coro):
         r = await ensure_prepared()
         task = asyncio.ensure_future(coro)
         while True:
-            done, _ = await asyncio.wait({task}, timeout=6)
+            done, _ = await asyncio.wait({task}, timeout=3.0)
             if done:
                 return task.result()
-            await r.write(b": working\n\n" if stream else b" ")
+            await safe_write(r, b": working\n\n" if stream else b" ")
 
-    content, reasoning, trace, generated, sandbox_snippets = [], [], [], [], []
-    usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-    status = 200
-    last_finish_reason = "stop"
-    nudged = False
-    loop_start = time.time()
+    # Send HTTP 200 + first byte right away so Vercel Edge never hits the 25s initial response timeout
+    await ensure_prepared()
 
-    async def emit(line: str):
-        reasoning.append(line)
-        if stream:
-            await sse({"reasoning_content": "\n" + line + "\n"})
+    use_long_sem = is_long_request(body, server_tools_enabled=False)
+    if use_long_sem:
+        sem_task = asyncio.ensure_future(_LONG_REQ_SEM.acquire())
+        while not sem_task.done():
+            await asyncio.wait({sem_task}, timeout=2.5)
+            if not sem_task.done():
+                r_wait = await ensure_prepared()
+                await safe_write(r_wait, b": working\n\n" if stream else b" ")
 
-    max_rounds = 4
-    for rnd in range(max_rounds):
-        elapsed = time.time() - loop_start
-        allow_tools_this_round = (rnd < max_rounds - 1) and bool(active_tools) and (elapsed < 40.0)
-        payload = {**base, "messages": msgs, "stream": True, "stream_options": {"include_usage": True}}
-        if allow_tools_this_round:
-            payload["tools"] = active_tools
+    try:
+        content, reasoning, trace, generated, sandbox_snippets = [], [], [], [], []
+        usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        status = 200
+        last_finish_reason = "stop"
+        nudged = False
+        loop_start = time.time()
 
-        try:
-            up = await req.app["session"].post(
-                target_upstream + "/v1/chat/completions",
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=None, connect=10, sock_connect=10, sock_read=None),
-            )
-        except Exception:
-            if resp is None:
-                return json_err(
-                    503,
-                    "Model inference server is temporarily unreachable.",
-                    "service_unavailable",
-                    extra_headers={"Retry-After": "5", **(rl_headers or {})},
-                )
-            break
+        async def emit(line: str):
+            reasoning.append(line)
+            if stream:
+                await sse({"reasoning_content": "\n" + line + "\n"})
 
-        if up.status != 200:
-            raw_err = await up.read()
-            up.release()
-            st_err, err_payload = parse_upstream_error(up.status, raw_err)
-            if resp is None:
-                # Never return HTTP 200 on Round 0 error! Return actual HTTP status code.
-                save_turn(st_err, None, None, None, {})
-                return web.json_response(err_payload, status=st_err, headers=hdrs)
-            status = st_err
-            break
+        max_rounds = 4
+        for rnd in range(max_rounds):
+            elapsed = time.time() - loop_start
+            allow_tools_this_round = (rnd < max_rounds - 1) and bool(active_tools) and (elapsed < 40.0)
+            payload = {**base, "messages": msgs, "stream": True, "stream_options": {"include_usage": True}}
+            if allow_tools_this_round:
+                payload["tools"] = active_tools
 
-        await ensure_prepared()
-        col = chatdb.StreamCollector()
-        buf = b""
-
-        async def pump():
-            nonlocal buf
-            async for chunk in up.content.iter_any():
-                col.feed(chunk)
-                buf += chunk
-                if stream:
-                    *lines, buf = buf.split(b"\n")
-                    for line in lines:
-                        if not line.startswith(b"data:") or line.strip() == b"data: [DONE]":
-                            continue
-                        try:
-                            ev = json.loads(line[5:])
-                        except Exception:
-                            continue
-                        for ch in ev.get("choices") or []:
-                            d = ch.get("delta") or {}
-                            out = {k: d[k] for k in ("content", "reasoning_content") if d.get(k)}
-                            if out:
-                                await sse(out)
-
-        try:
-            await pump() if stream else await keepalive(pump())
-        finally:
-            up.release()
-
-        text, think, calls, u = col.result()
-        if col.finish_reason in ("stop", "length"):
-            last_finish_reason = col.finish_reason
-        for k in usage:
-            usage[k] += (u or {}).get(k) or 0
-        if text:
-            content.append(text)
-        if think:
-            reasoning.append(think)
-        if not calls:
-            real = [g for g in generated if g in (text or "")]
-            if (
-                "![" in (text or "")
-                and not real
-                and not nudged
-                and rnd < max_rounds - 1
-                and any(t["function"]["name"] == "generate_image" for t in active_tools)
-            ):
-                nudged = True
-                if content and content[-1] == text:
-                    content.pop()
-                msgs.append({"role": "assistant", "content": text})
-                msgs.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "[system] That image URL does not exist because `generate_image` was not called. "
-                            "Call `generate_image` now to create the image, then include its returned URL."
-                        ),
-                    }
-                )
-                if stream:
-                    await sse({"content": "\n\n"})
-                continue
-            break
-
-        msgs.append({"role": "assistant", "content": text or "", "tool_calls": calls})
-        for c in calls:
-            fn = c.get("function") or {}
-            t_name = fn.get("name", "")
             try:
-                args = json.loads(fn.get("arguments") or "{}")
+                up = await keepalive(
+                    req.app["session"].post(
+                        target_upstream + "/v1/chat/completions",
+                        json=payload,
+                        timeout=aiohttp.ClientTimeout(total=None, connect=10, sock_connect=10, sock_read=None),
+                    )
+                )
             except Exception:
-                args = {}
-            if t_name == "run_sandbox_code" and isinstance(args.get("code"), str) and args["code"].strip():
-                lang = str(args.get("language") or "python")
-                sandbox_snippets.append((lang, args["code"].strip()))
-            if stream:
-                await sse(
-                    {"reasoning_content": f"\n[executing {t_name}: {json.dumps(args)[:180]}]\n"},
-                    tool_trace={"phase": "start", "tool": t_name, "args": args},
-                )
-            result, line = await keepalive(
-                server_tools.run(t_name, args, body.get("messages", []), generated, emit, allow_command=allow_command)
-            )
-            await emit(line)
-            if stream:
-                await sse(
-                    {},
-                    tool_trace={"phase": "done", "tool": t_name, "args": args, "result": result[:1200]},
-                )
-            msgs.append({"role": "tool", "tool_call_id": c.get("id") or t_name, "content": result[:14000]})
-            trace.append({"tool": t_name, "args": args, "result": result[:1200]})
+                break
 
-    r = await ensure_prepared()
-    answer = "".join(content).strip()
+            if up.status != 200:
+                raw_err = await up.read()
+                up.release()
+                st_err, _ = parse_upstream_error(up.status, raw_err)
+                status = st_err
+                break
 
-    # If the model executed code in `run_sandbox_code` and only narrated the outcome in `content` without
-    # including a code block, append the verified sandbox code block into `content`!
-    if sandbox_snippets and "```" not in answer:
-        last_lang, last_code = sandbox_snippets[-1]
-        code_block = f"\n\n```{last_lang}\n{last_code}\n```"
-        answer = (answer + code_block).strip()
-        if stream:
-            await sse({"content": code_block})
+            col = chatdb.StreamCollector()
+            buf = b""
 
-    images = [f"{server_tools.PUBLIC_BASE}/files/{g}" for g in generated]
-    missing_md = [
-        f"![Generated Image]({server_tools.PUBLIC_BASE}/files/{g})"
-        for g in generated
-        if g not in answer
-    ]
-    if missing_md:
-        extra_md = ("\n\n" if answer else "") + "\n\n".join(missing_md)
-        answer = (answer + extra_md).strip()
-        if stream:
-            await sse({"content": extra_md, "images": images})
-    if stream:
-        await sse({}, finish=last_finish_reason)
-        if want_usage:
-            await sse({}, usage=usage)
-        await r.write(b"data: [DONE]\n\n")
-    else:
-        await r.write(
-            json.dumps(
-                {
-                    "id": cid,
-                    "object": "chat.completion",
-                    "created": created,
-                    "model": client_model,
-                    "usage": usage,
-                    "images": images,
-                    "tool_trace": trace,
-                    "choices": [
+            async def pump():
+                nonlocal buf
+                async for chunk in up.content.iter_any():
+                    col.feed(chunk)
+                    buf += chunk
+                    if stream:
+                        *lines, buf = buf.split(b"\n")
+                        for line in lines:
+                            if not line.startswith(b"data:") or line.strip() == b"data: [DONE]":
+                                continue
+                            try:
+                                ev = json.loads(line[5:])
+                            except Exception:
+                                continue
+                            for ch in ev.get("choices") or []:
+                                d = ch.get("delta") or {}
+                                out = {k: d[k] for k in ("content", "reasoning_content") if d.get(k)}
+                                if out:
+                                    await sse(out)
+
+            try:
+                await pump() if stream else await keepalive(pump())
+            finally:
+                up.release()
+
+            text, think, calls, u = col.result()
+            if col.finish_reason in ("stop", "length"):
+                last_finish_reason = col.finish_reason
+            for k in usage:
+                usage[k] += (u or {}).get(k) or 0
+            if text:
+                content.append(text)
+            if think:
+                reasoning.append(think)
+            if not calls:
+                real = [g for g in generated if g in (text or "")]
+                if (
+                    "![" in (text or "")
+                    and not real
+                    and not nudged
+                    and rnd < max_rounds - 1
+                    and any(t["function"]["name"] == "generate_image" for t in active_tools)
+                ):
+                    nudged = True
+                    if content and content[-1] == text:
+                        content.pop()
+                    msgs.append({"role": "assistant", "content": text})
+                    msgs.append(
                         {
-                            "index": 0,
-                            "finish_reason": last_finish_reason,
-                            "message": {
-                                "role": "assistant",
-                                "content": answer,
-                                "images": images,
-                                "reasoning_content": "\n".join(reasoning) or None,
-                            },
+                            "role": "user",
+                            "content": (
+                                "[system] That image URL does not exist because `generate_image` was not called. "
+                                "Call `generate_image` now to create the image, then include its returned URL."
+                            ),
                         }
-                    ],
-                }
-            ).encode("utf-8")
-        )
-    await r.write_eof()
-    save_turn(status, answer, "\n".join(reasoning) or None, trace or None, usage)
-    return r
+                    )
+                    if stream:
+                        await sse({"content": "\n\n"})
+                    continue
+                break
+
+            msgs.append({"role": "assistant", "content": text or "", "tool_calls": calls})
+            for c in calls:
+                fn = c.get("function") or {}
+                t_name = fn.get("name", "")
+                try:
+                    args = json.loads(fn.get("arguments") or "{}")
+                except Exception:
+                    args = {}
+                if t_name == "run_sandbox_code" and isinstance(args.get("code"), str) and args["code"].strip():
+                    lang = str(args.get("language") or "python")
+                    sandbox_snippets.append((lang, args["code"].strip()))
+                if stream:
+                    await sse(
+                        {"reasoning_content": f"\n[executing {t_name}: {json.dumps(args)[:180]}]\n"},
+                        tool_trace={"phase": "start", "tool": t_name, "args": args},
+                    )
+                result, line = await keepalive(
+                    server_tools.run(t_name, args, body.get("messages", []), generated, emit, allow_command=allow_command)
+                )
+                await emit(line)
+                if stream:
+                    await sse(
+                        {},
+                        tool_trace={"phase": "done", "tool": t_name, "args": args, "result": result[:1200]},
+                    )
+                msgs.append({"role": "tool", "tool_call_id": c.get("id") or t_name, "content": result[:14000]})
+                trace.append({"tool": t_name, "args": args, "result": result[:1200]})
+
+        r = await ensure_prepared()
+        answer = "".join(content).strip()
+
+        if sandbox_snippets and "```" not in answer:
+            last_lang, last_code = sandbox_snippets[-1]
+            code_block = f"\n\n```{last_lang}\n{last_code}\n```"
+            answer = (answer + code_block).strip()
+            if stream:
+                await sse({"content": code_block})
+
+        images = [f"{server_tools.PUBLIC_BASE}/files/{g}" for g in generated]
+        missing_md = [
+            f"![Generated Image]({server_tools.PUBLIC_BASE}/files/{g})"
+            for g in generated
+            if g not in answer
+        ]
+        if missing_md:
+            extra_md = ("\n\n" if answer else "") + "\n\n".join(missing_md)
+            answer = (answer + extra_md).strip()
+            if stream:
+                await sse({"content": extra_md, "images": images})
+        if stream:
+            await sse({}, finish=last_finish_reason)
+            if want_usage:
+                await sse({}, usage=usage)
+            await safe_write(r, b"data: [DONE]\n\n")
+        else:
+            await safe_write(
+                r,
+                json.dumps(
+                    {
+                        "id": cid,
+                        "object": "chat.completion",
+                        "created": created,
+                        "model": client_model,
+                        "usage": usage,
+                        "images": images,
+                        "tool_trace": trace,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "finish_reason": last_finish_reason,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": answer,
+                                    "images": images,
+                                    "reasoning_content": "\n".join(reasoning) or None,
+                                },
+                            }
+                        ],
+                    }
+                ).encode("utf-8"),
+            )
+        await safe_write_eof(r)
+        save_turn(status, answer, "\n".join(reasoning) or None, trace or None, usage)
+        return r
+    finally:
+        if use_long_sem:
+            _LONG_REQ_SEM.release()
 
 
 async def app_ctx(app: web.Application):

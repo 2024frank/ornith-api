@@ -325,25 +325,43 @@ def run_suite():
         return f"short_latency={dt_short:.2f}s while long_request ran ({dt_long:.2f}s)"
     check("18. Short request stays fast (<5s) while long essay generates", test_short_during_long)
 
-    # 19. Load burst: 16 concurrent short requests
+    # 19. Load burst & Rate limiting: 20 concurrent requests trigger 429 with Retry-After and recover cleanly
     def test_load_burst():
         def one_req(i):
-            st, _, d, dt = http_req("POST", "/v1/chat/completions", {
+            st, hdrs, d, dt = http_req("POST", "/v1/chat/completions", {
                 "model": "ornith-1.5-35b-uncensored",
-                "messages": [{"role": "user", "content": f"Reply with one word: ok"}],
+                "messages": [{"role": "user", "content": f"Reply with one word: ok {i}"}],
                 "max_tokens": 4,
             })
-            return st, dt
+            return st, hdrs, dt
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=16) as ex:
-            futs = [ex.submit(one_req, i) for i in range(16)]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ex:
+            futs = [ex.submit(one_req, i) for i in range(20)]
             outs = [f.result() for f in futs]
-        ok_count = sum(1 for st, _ in outs if st == 200)
-        lats = sorted(dt for _, dt in outs)
-        p95 = lats[int(len(lats) * 0.95) - 1]
-        assert ok_count == 16, f"Only {ok_count}/16 succeeded"
-        return f"16/16 succeeded, median={lats[8]:.2f}s, p95={p95:.2f}s"
-    check("19. Concurrent load burst (16 simultaneous requests)", test_load_burst)
+        ok_count = sum(1 for st, _, _ in outs if st == 200)
+        rl_count = sum(1 for st, _, _ in outs if st == 429)
+        assert ok_count > 0 and rl_count > 0, f"Expected mix of 200 and 429 on 20 concurrent requests, got 200={ok_count}, 429={rl_count}"
+        time.sleep(2.2)
+        st_rec, _, _, dt_rec = http_req("POST", "/v1/chat/completions", {
+            "model": "ornith-1.5-35b",
+            "messages": [{"role": "user", "content": "ok"}],
+            "max_tokens": 4,
+        })
+        assert st_rec == 200, f"Expected 200 after rate-limit recovery, got {st_rec}"
+        return f"200={ok_count}, 429={rl_count}, recovered in {dt_rec:.2f}s"
+    check("19. Concurrent load burst (20 simultaneous -> 429 + clean recovery)", test_load_burst)
+
+    # 20. Model label fidelity in response
+    def test_model_labels():
+        for m in ("ornith-1.5-35b", "ornith-1.5-35b-uncensored", "ornith-1.5-35b-agent"):
+            st, _, d, _ = http_req("POST", "/v1/chat/completions", {
+                "model": m,
+                "messages": [{"role": "user", "content": "Reply with one word: pong"}],
+                "max_tokens": 8,
+            })
+            assert st == 200 and d.get("model") == m, f"Expected model={m}, got {st} {d}"
+        return "all 3 model IDs echoed accurately"
+    check("20. Model label fidelity across all 3 models", test_model_labels)
 
     print("\n" + "=" * 65)
     passed = sum(1 for _, ok, _ in results if ok)

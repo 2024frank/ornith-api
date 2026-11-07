@@ -181,7 +181,7 @@ class StreamCollector:
             "id": self.cmpl_id or default_id,
             "object": "chat.completion",
             "created": self.created or int(time.time()),
-            "model": self.model or default_model,
+            "model": default_model or self.model,
             "choices": [
                 {
                     "index": 0,
